@@ -1,0 +1,592 @@
+---
+title: "QAM_HW4"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = F, fig.align = "center", fig.height = 4, warning = F, message = F)
+```
+
+```{r}
+library(data.table)
+library(RPostgres)
+library(sqldf)
+require(lubridate)
+require(moments)
+require(ggplot2)
+require(magrittr)
+require(kableExtra)
+require(zoo)
+```
+
+```{r}
+tbl_disp <- function(tbl, col.names = colnames(tbl), digits = 5, latex_opts = c("hold_position", "striped"),...){
+  tbl %>% kable(., col.names = col.names, digits = digits, align = c("c")) %>% 
+    kable_styling(latex_options = latex_opts, ...)
+}
+```
+
+
+```{r}
+wrds <- dbConnect(Postgres(),
+                  host='wrds-pgdata.wharton.upenn.edu',
+                  port=9737,
+                  dbname='wrds',
+                  sslmode='require')
+
+
+
+wrds_query <- function(sql, n = -1){
+  res <- dbSendQuery(wrds, sql) 
+  data <- dbFetch(res, n); 
+  dbClearResult(res)
+  data
+
+}
+
+#link CRSP with link table
+df_crsp <- wrds_query("select a.permno,
+                  a.permco,
+                  c.shrcd,
+                  c.exchcd,
+                  c.siccd,
+                  c.ticker,
+                  a.date,
+                  a.prc,
+                  a.ret,
+                  a.shrout,
+                  a.vol,
+                  d.dlstdt,
+                  d.dlret,
+                  b.gvkey,
+                  b.liid,
+                  b.linkprim
+           from crsp.msf a
+           inner join crsp.ccmxpf_linktable b
+           on
+            a.permno = b.lpermno
+            and b.linktype in ('LU', 'LC') 
+            and b.linkprim in ('P','C')
+            and usedflag = 1
+            and a.date between b.linkdt and coalesce(b.linkenddt, CURRENT_DATE)
+           inner join crsp.msenames c
+           on
+            a.permno = c.permno
+            and a.date between c.namedt and coalesce(c.nameendt, CURRENT_DATE)
+           left join crsp.msedelist d
+           on
+            a.permno = d.permno
+            and date_trunc('month', a.date) = date_trunc('month', d.dlstdt)
+          where
+            a.date >= '1970-01-01' and a.date <= '2019-12-31'
+            and c.shrcd in (10,11)
+            and c.exchcd in (1,2,3)
+           ")
+
+df_crsp <- as.data.table(df_crsp)
+
+#exclude financial firms
+df_crsp = df_crsp[!(siccd >= 6200 & siccd <= 6299) &
+          siccd != 6700 & !(siccd >= 6710 & siccd <= 6719) &
+          !(siccd >= 6720 & siccd <= 6726) &
+          !(siccd >= 6730 & siccd <= 6733) & 
+          !(siccd >= 6740 & siccd <= 6779) &
+          !(siccd >= 6790 & siccd <= 6795) &
+          !(siccd >= 6798 & siccd <= 6799)]
+#exclude banking
+# df_crsp = df_crsp[!(siccd >= 6010 & siccd <= 6019) &
+#           siccd != 6000 & !(siccd >= 6020 & siccd <= 6036) &
+#           !(siccd >= 6040 & siccd <= 6062) &
+#           !(siccd >= 6080 & siccd <= 6082) & 
+#           !(siccd >= 6090 & siccd <= 6100) &
+#           !(siccd >= 6110 & siccd <= 6113) &
+#           !(siccd >= 6120 & siccd <= 6129) &
+#           !(siccd >= 6130 & siccd <= 6179)]
+
+#Clean up returns
+df_crsp[ret %in% c(-66, -77, -88, -99), ret := NA]
+df_crsp[dlret %in% c(-55, -66, -88, -99), dlret := NA]
+
+##Total Returns by PERMNO
+df_crsp[, ret := ifelse(is.na(ret),
+                          ifelse(is.na(dlret), NA, dlret),
+                          ifelse(is.na(dlret), ret, (1+ret)*(1+dlret) - 1))]
+#Drop dlret column
+df_crsp[, `:=`(dlret = NULL,
+               dlstdt = NULL)]
+
+#create market cap
+df_crsp[, mkt_cap := abs(prc) * shrout]
+df_crsp[order(permno, date), lag_mkt_cap := shift(mkt_cap), by = permno]
+
+#fix date
+df_crsp[,date := ceiling_date(date, unit = "month") - days(1)]
+
+#check valid lag
+df_crsp[, yrmo := floor_date(date, unit = "month")][,lag_yrmo := shift(yrmo), by = permno]
+df_crsp[, valid_lag := yrmo == floor_date(lag_yrmo %m+% period("1 month"), unit = "month")]
+df_crsp <- df_crsp[valid_lag == T & lag_mkt_cap > 0 & !is.na(ret)] #no skips
+
+
+df_crsp = df_crsp[,.(permco,permno,shrcd,exchcd,date,prc,ret,shrout,gvkey,liid,mkt_cap,lag_mkt_cap)]
+
+#check dups
+# sqldf("select count(*) from df_crsp group by permno, date having count(*) > 1")
+
+
+#COMPUSTAT fundamentals data
+df_compustat <- wrds_query("select
+               a.gvkey,
+               a.iid,
+               a.datadate,
+               a.fyear,
+               a.seq,
+               a.ceq,
+               a.pstk,
+               a.at,
+               a.lt,
+               a.mib,
+               a.txditc,
+               a.itcb,
+               a.txdb,
+               a.pstkrv,
+               a.pstkl,
+               b.prba /* pension */
+            from comp.funda a
+            left join comp.aco_pnfnda b
+            on
+              a.gvkey = b.gvkey
+              and a.datadate = b.datadate
+            where
+              a.datadate >= '1970-01-01'
+              and a.datafmt = 'STD'
+              and a.consol = 'C'
+              and a.indfmt = 'INDL'
+            ")
+
+df_compustat <- as.data.table(df_compustat)
+
+#create book equity variables
+df_compustat[, `:=`(she = fcoalesce(seq, ceq + pstk, at - lt - mib, at - lt),
+                    dt = fcoalesce(txditc, fcoalesce(itcb,0) + fcoalesce(txdb, 0)),
+                    ps = fcoalesce(pstkrv, pstkl, pstk)
+                    )][, be := she - fcoalesce(ps, 0) + fcoalesce(dt, 0) - fcoalesce(prba, 0) ]
+#if be = 0 set to NA
+df_compustat[, be := ifelse(is.na(be) | be == 0, NA, be)]
+
+df_compustat = df_compustat[!is.na(be)]
+
+# df_compustat[, f_date := make_date(as.integer(fyear) + 1, 7, 1)] 
+
+df_compustat[, f_date := fifelse(month(datadate) <= 6,
+                                        make_date(year(datadate), 7, 1),
+                                        make_date(year(datadate)+1 , 7, 1))  ]
+
+
+df_compustat[, f_date := ceiling_date(f_date, unit = "month") - days(1)]
+
+
+df_compustat <- as.data.table(sqldf("select *, row_number() OVER (PARTITION BY gvkey, f_date ORDER BY datadate desc) as rn
+      from df_compustat "))
+
+#get latest data (some financial year has multiple datadates)
+df_compustat = df_compustat[rn == 1]
+df_compustat[, rn := NULL]
+
+
+#check dups (gvkey, iid, f_date)
+# sqldf("select f_date, gvkey, count(*) from df_compustat group by gvkey, f_date having count(*) > 1")
+
+
+#merge
+df_merged <- sqldf("
+      select
+          a.*,
+          b.be,
+          b.datadate,
+          b.fyear,
+          b.f_date
+      from df_crsp a
+      left join (
+      select 
+          gvkey,
+          iid,
+          be,
+          datadate,
+          fyear,
+          f_date
+      from df_compustat
+      ) b
+      on
+        a.gvkey = b.gvkey
+        and a.liid = b.iid
+        and a.date = b.f_date
+      ")
+
+
+
+df_merged = as.data.table(df_merged)
+
+
+
+#check  dups permno per month
+# sqldf("select count(*) from df_merged group by permno, date having count(*) > 1")
+
+
+#############################################
+#Combine permno level to 1 PERMCO per month
+#############################################
+df_merged <- df_merged[, .(shrcd = first(shrcd),
+              exchcd = first(exchcd),
+              ret = sum(lag_mkt_cap/sum(lag_mkt_cap) * ret),
+              lag_mkt_cap = sum(lag_mkt_cap, na.rm = T),
+               be = sum(be, na.rm = T) ), by = .(permco, date)]
+
+
+#check dups (permco per month)
+# sqldf("select count(*) from df_merged group by permco, date having count(*) > 1")
+
+
+#create portfolio year variable
+#portfolio formation at the end of each June (Start July)
+df_merged[, pf_year :=  ifelse(month(date) <= 6, (year(date)-1)*100 + 6 , (year(date))*100 + 6) ]
+
+
+###################################################################
+#Size
+###################################################################
+#rank at end of june (lag_mkt_cap data)
+df_merged[month(date) == 7, size_rank := frank(lag_mkt_cap), by = pf_year]
+
+###deciles
+#NYSE breakpoints using size (deciles)
+df_merged[, size_decile := cut(size_rank, breaks=quantile(ifelse(exchcd == 1, size_rank, NA),
+                                                        probs=seq(0,1,0.1),na.rm=TRUE), labels=F, right = F), by = pf_year]
+setorder(df_merged, date, size_rank)
+#carry forward for each formation year
+df_merged[month(date) == 7, size_decile := na.locf(size_decile, na.rm = F), by = .(pf_year)]
+#backward
+df_merged[month(date) == 7 ,size_decile := na.locf(size_decile, na.rm = F, fromLast = T), by = .(pf_year)]
+
+#left join
+df_merged  = merge(df_merged, df_merged[month(date) == 7, .(size_decile, pf_year, permco)], by = c("pf_year", "permco"), all.x = T)
+df_merged[, size_decile := fcoalesce(size_decile.x, size_decile.y)][, `:=`(size_decile.x = NULL, size_decile.y = NULL)]
+
+
+
+###################################################################
+#B/M portfolio formation (at end of June)
+###################################################################
+# df_merged[,`:=`(valid_bm = NULL, lag_6_mkt = NULL, bm = NULL, bm_decile = NULL)]
+
+df_merged[, valid_bm := month(shift(date, 7)) == 12  & !is.na(shift(lag_mkt_cap, 6)) & !is.na(lag_mkt_cap), by = .(permco)]
+df_merged[, lag_6_mkt := shift(lag_mkt_cap, 6), by = .(permco)]
+
+df_merged[month(date) == 7 & valid_bm == T, bm := be / lag_6_mkt]
+df_merged[month(date) == 7 & bm > 0 & valid_bm == T, bm_rank := frank(bm), by = pf_year]
+
+
+# View(df_merged[month(date) == 7 & year(date) == 2018 & valid_bm == T][order(bm_rank)])
+
+
+#NYSE (deciles) breakpoints bm_rank
+df_merged[valid_bm == T & bm > 0 , bm_decile := cut(bm_rank, breaks=quantile(ifelse(exchcd == 1, bm_rank, NA),
+                                                        probs=seq(0,1,0.1),na.rm=TRUE), labels=F, right = F), by = pf_year]
+
+
+setorder(df_merged, date, bm_rank)
+#carry forward for each formation year, exclude bm < 0
+df_merged[month(date) == 7 & bm > 0 & valid_bm == T, bm_decile := na.locf(bm_decile, na.rm = F), by = .(pf_year)]
+#also backward
+df_merged[month(date) == 7 & bm > 0 & valid_bm == T, bm_decile := na.locf(bm_decile, na.rm = F, fromLast = T), by = .(pf_year)]
+
+
+#left join to get deciles for the year
+df_merged  = merge(df_merged, df_merged[month(date) == 7 & bm > 0 & valid_bm == T, .(bm_decile, pf_year, permco)],
+                   by = c("pf_year", "permco"), all.x = T)
+df_merged[, bm_decile := fcoalesce(bm_decile.x, bm_decile.y)][, `:=`(bm_decile.x = NULL, bm_decile.y = NULL)]
+
+
+```
+
+### Question 1.
+To construct the size and BM portfolios several data cleaning processes steps have been done and is listed below: \
+1. Sample Period: The sample period considered for the replication strategy is for the period of January 1973 -  December 2019. 
+1. Universe of Stocks: The sample has been restricted to only include common shares (SHRCD = 10 and 11) and will also be restricted to securities traded on the New York Stock Exchange, American Stock Exchange, and NASDAQ (EXCHCD = 1, 2, and 3). Financial trading firms have been excluded from the universe of stocks as defined using the KRF SICCODE industry 47 due to their high leverage that is unusual for all the other firms. \
+2. Missing Returns: The data contains missing returns specifically for RET with the characters (E, D, C, B, A), are treated as they are missing and will be considered to have 0 return. The characters represent no listing information, no valid previous prices, etc. The universe of stocks that have missing returns are quite small and will be assumed to have negligible impact when replicating the value-weighted returns. \
+3. Delisting return calculation: Similarly, the delisting returns could also be missing and DLRET with the characters (S, T, A, P) will also be considered as missing and will be assumed to have 0 return. \
+4. Total return calculation: To calculate the total monthly return for each stock I will consider both returns (with dividends) and total delisting returns (with dividends). More specifically, if both the returns and delisting-returns are not missing then I will add both returns in the calculation to calculate the total return, if the returns are not missing and the delisting returns are missing I will only use the returns, and finally if the returns are missing and the delisting returns are not, I will only use the delisting returns. \
+5. Validation Checks: To ensure that the previous record for each PERMNO is the actual 1 month lagged data, I have created a valid flag variable that checks whether or not the previous record for that PERMNO is the previous lagged month. Furthermore, I have only included records with valid previous lagged month, non-missing lagged market capitalization (since it will be used to calculate the value weighted returns) and non-missing returns.
+6. Joining with CCM LINK: Before joining the CRSP data to the COMPUSTAT data to get financial statement data, I have joined the CRSP dataset to the CCM link table. When joining the CRSP dataset to the CCM link table I have joined only when the link type is LU/LC meaning that the link is complete or keeping the reliable links only and that I am only considering the primary links - P/C. Furthermore, the linking data must be valid between the linking start date and the linking end date. After joining the CRSP dataset with the CCM link dataset, I can now have a GVKEY and IID pair for each PERMNO and since each GVKEY and IID Pair is unique to each PERMNO (under the conditions stated above - primary link, etc.), I do not need to clean any duplicated data when joining the CRSP dataset with the CCM link dataset.
+7. COMPUSTAT dataset: To get the Book Value Equity for each firm to create the Book-To-Market variable, COMPUSTAT data is needed. The annual fundamentals COMPUSTAT data will be used to ge the BE for each firm furthermore, pensions data is obtained from ACO_PNFNDA dataset. To create the BE variable I have done the following process: First, the shareholder's equity - total is considered (SEQ), if it is not available common/ordinary equity will be used (CEQ) plus the preferred stock capital - total (PSTK). If they're not available the total assets minus total liabilities minus minority interest (AT - LT - MIB) will be used. If they're not available AT - LT will be used. To create the deferred taxes and investment tax credit (DT), I have used deferred taxes and investment tax credit (TXDITC). If it is not available the investment tax credit (ITCB) plus deferred taxes (TXDB) will be used. To create the book value of preferred stock (PS), I have used the preferred stock redemption value (PSTKRV). If it is not available the preferred stock liquidating value will be used (PSTKL). If it is not available the par value - preferred stock capital (PSTK) will be used instead. Finally the BE is defined as SHE - PS + DT - PRBA where PRBA is the postretirement benefit asset from the COMPUSTAT pension annual data (ACO_PNFNDA) and is joined to the original COMPUSTAT data using GVKEY.
+8. Combining CRSP and COMPUSTAT: after creating the BE variable in the COMPUSTAT dataset, we can now join the CRSP dataset (that has been joined with the CCM link table) to the COMPUSTAT dataset. Since when creating the BM portfolio we will use the BE used for the last fiscal year end for last year for the portfolio formation to that year (will be expanded further below under stock portfolio formation section), I will create a fiscal year variable based on the datadate and add 1 year to the fiscal year variable to ensure that the last fiscal year end is in t-1 of the portfolio formation at year t. Finally, for each fiscal year there might be some multiple datadates available (could be due to the change in accounting methodology reporting) and I will use the latest datadate available for that fiscal year in that case. After doing so, I will join the CRSP dataset with the COMPUSTAT dataset based on the fiscal year, GVKEY and IID. The resulting final dataset will have all the CRSP dataset (PERMNO level) with the COMPUSTAT fundamentals joined only for July (since portfolios are formed at the end of June of each year).
+6. Stocks Portfolio Formation: After joining the CRSP and COMPUSTAT dataset I will now summarize the PERMNO level dataset to PERMCO level, hence, I will sum the BE and ME for each PERMNO that the PERMCO has and calculate the value-weighted return for each PERMCO level. Hence, the dataset now is unique for each PERMCO and per month. After doing so, to create the size ranked portfolio, I will use the lagged market cap data on month 7 of year t to rank the stocks for that year and the rank/decile will be kept constant for that portfolio until month 6 of year t + 1 (annual rebalancing). Hence, the portfolio will then be rebalanced on month 7 of year t + 1 and the lagged market cap data on that month (market cap data of June of year t + 1). Similarly for the BM portfolio, the portfolio will be formed at the end of June of year t, and I will be using the BE data obtained from the fiscal year that ended on the previous year (t - 1) whereas the ME data used will be the ME for December of year t-1 for the portfolio formation of month 7 of year t. Hence, when forming the BM portfolio for of month 7 of year t, the market cap data on December of year t-1 must not be missing and the lagged market cap variable for month 7 should not be missing. Furthermore, when creating the BM deciles the firms with negative BMs (BM < 0) will not be considered, and the rest of the firms will be considered to create the BM deciles. Finally, when creating the deciles only the NYSE firms are used to create the breakpoints (for both the size and BM portfolio), hence, for each decile, the portfolio has the same number of NYSE firms. Furthermore, when creating the portfolio deciles, I will create breakpoints according to the size/BM rankcalculated and I will keep the right interval of the breakpoints open, meaning that firms located at exactly the boundary will be considered to be included in the next decile portfolio. All of the conditions above must be satisfied to be included in the portfolio. 
+7. Portfolio returns: Finally for each portfolio formed based on each decile (both size and BM), the value-weighted returns are calculated for each portfolio (decile) based on the lagged market cap to avoid forward bias. Furthermore, when calculating the HML and SMB factor the the size decile used will be the 0-50 percentile and 50-100 percentile. Whereas, the BM deciles used will be split into 3 different groups 0-30 percentile, 30-70 percentile and 70-100 percentile. To calculate the HML factor the following formula is used: $HML = 0.5(SmallValue + LargeValue) - 0.5 (SmallGrowth + LargeGrowth)$. Whereas to calculate the SMB factor the following formula is used instead $SMB = 1/3(SmallValue + SmallNeutral + SmallGrowth) - 1/3(LargeValue + LargeNeutral + LargeGrowth) $.
+
+
+
+```{r}
+####################################################
+#Risk Free
+####################################################
+#load fama french data
+ff = as.data.table(read.csv("F-F_Research_Data_Factors.CSV", stringsAsFactors = F, skip = 3, nrows = 1122))
+
+colnames(ff) <- c("date", "Market_minus_RF", "SMB","HML", "Rf")
+ff[, date := as.character(date)][, date := make_date(as.numeric(substring(date, 1,4)), as.numeric(substring(date, 5,6)), day = 1)]
+ff[, `:=`(Year = year(date),
+          Month = month(date))]
+ff[, `:=`(SMB = SMB/100,
+          HML = HML/100,
+          Rf = Rf/100,
+          Market_minus_RF = Market_minus_RF/100)]
+
+
+####################################################
+#merge returns with ff
+df_merged[, `:=`(Year = year(date), Month = month(date))]
+
+df_size <- df_merged[!is.na(size_decile), .(size_ret = weighted.mean(ret, lag_mkt_cap, na.rm = T)), by = .(Year, Month, size_decile)]
+df_bm <- df_merged[!is.na(bm_decile), .(bm_ret = weighted.mean(ret, lag_mkt_cap, na.rm = T)), by = .(Year, Month, bm_decile)]
+
+####################################################
+#SMB HML
+####################################################
+df_merged[, `:=`(size_brk = ifelse(size_decile <= 5, 1, 2),
+                 bm_brk = ifelse(bm_decile <= 3, 1, ifelse(bm_decile > 3 & bm_decile <= 7, 2, 3) ) ) ]
+df_smb_hml <- df_merged[!is.na(size_brk) & !is.na(bm_brk), .(vwret = weighted.mean(ret, lag_mkt_cap, na.rm = T)), by = .(Year, Month, size_brk, bm_brk) ]
+
+df_smb_hml <- df_smb_hml[,  .(smb_ret = 1/3 * sum(vwret[size_brk == 1]) -  1/3 * sum(vwret[size_brk == 2]),
+                           hml_ret = 0.5 * sum(vwret[bm_brk == 2]) - 0.5 * sum(vwret[bm_brk == 1]) )  ,by = .(Year, Month)]
+
+####################################################
+#### RESULTS table
+res <- merge(df_size, df_bm, by.x = c("Year", "Month", "size_decile"), by.y = c("Year", "Month", "bm_decile"))
+res <- merge(res, ff[,.(Year, Month, Rf)], by = c("Year", "Month"), all.x = T)
+colnames(res) <- c("Year", "Month", "decile", "size_ret", "bm_ret", "Rf")
+
+####################################################
+#Excess returns
+####################################################
+#WML portfolios
+create_wml <- function(df, ...){
+    wml_df <- df[decile == 1,][df[decile == 10,], on = c("Year", "Month")]
+    wml_df <- wml_df[, ...]
+    funion(df, wml_df)
+  }
+
+#WML Size BM
+res <- create_wml(res, .(Year, Month, decile = 11, size_ret = i.size_ret - size_ret, bm_ret = i.bm_ret - bm_ret, Rf))
+
+#excess
+res[,size_ret := size_ret - Rf]
+res[,bm_ret := bm_ret - Rf]
+res[,date := make_date(Year,Month,1)]
+
+####################################################
+#Merge SMB HML factors
+res <- merge(res, df_smb_hml, by = c("Year", "Month"), all.x = T)
+```
+
+
+```{r}
+#KRF Size
+krf_size <- as.data.table(read.csv("Portfolios_Formed_on_ME.CSV", skip = 12, nrows = 1125))
+
+krf_size <- krf_size[, c(.("YearMon" = X), lapply(.SD, function(x) x/100)), .SDcols = -1]
+krf_size <- krf_size[, c(1, 11:20)]
+colnames(krf_size) <- c("YearMon", 1:10)
+
+krf_size[, `:=`(Year = as.numeric(substring(YearMon, 1, 4)), Month = as.numeric(substring(YearMon, 5, 6)))]
+krf_size <- melt(krf_size, id.vars = c("Year", "Month"), measure.vars = colnames(krf_size)[2:11], variable.name = "decile", value.name = "size_ret")
+krf_size$decile <- as.numeric(krf_size$decile)
+
+
+#KRF BM
+krf_bm <- as.data.table(read.csv("Portfolios_Formed_on_BE-ME.CSV",skip = 23, nrows = 1125))
+krf_bm <- krf_bm[, c(.("YearMon" = X), lapply(.SD, function(x) x/100)), .SDcols = -1]
+krf_bm <- krf_bm[, c(1, 11:20)]
+colnames(krf_bm) <- c("YearMon", 1:10)
+
+krf_bm[, `:=`(Year = as.numeric(substring(YearMon, 1, 4)), Month = as.numeric(substring(YearMon, 5, 6)))]
+krf_bm <- melt(krf_bm, id.vars = c("Year", "Month"), measure.vars = colnames(krf_bm)[2:11], variable.name = "decile", value.name = "bm_ret")
+krf_bm$decile <- as.numeric(krf_bm$decile)
+
+
+#KRF HML SMB
+krf_smb_hml <- as.data.table(read.csv("6_Portfolios_2x3.CSV", skip = 15, nrows = 1126))
+krf_smb_hml <- krf_smb_hml[, c(.("YearMon" = X), lapply(.SD, function(x) x/100)), .SDcols = -1]
+krf_smb_hml[, `:=`(Year = as.numeric(substring(YearMon, 1, 4)), Month = as.numeric(substring(YearMon, 5, 6)))]
+krf_smb_hml[, `:=`(HML = 0.5 * (SMALL.HiBM + BIG.HiBM) - 0.5 *(SMALL.LoBM + BIG.LoBM),
+                   SMB = 1/3 * (SMALL.LoBM + ME1.BM2 + SMALL.HiBM) - 1/3 * (BIG.LoBM + ME2.BM2 + BIG.HiBM) )]
+
+
+#create WML portfolios  size/bm
+krf_size <- create_wml(krf_size[, .(Year, Month, decile, size_ret)], 
+                       .(Year, Month, decile = 11, size_ret = i.size_ret - size_ret))
+
+krf_bm <- create_wml(krf_bm[, .(Year, Month, decile, bm_ret)], 
+                       .(Year, Month, decile = 11, bm_ret = i.bm_ret - bm_ret))
+
+
+
+###############################################################################
+```
+
+The sample resulting dataset after doing all the data processing is shown in the table below: \
+```{r}
+res[Year == 2019, -c(7)][order(Year,Month,decile)][1:10] %>% tbl_disp(full_width = T, font_size = 8)
+```
+
+
+### Question 2. Size Decile
+For the size decile the annualized average excess returns, volatility, SR and skewness is shown below:
+```{r}
+summary_ret <- function(return_tbl, ret_name){
+  returns <- copy(return_tbl)
+  
+  returns <- returns[data.table::between(make_date(Year, Month, 1), "1973-01-01", "2019-12-31"), ]
+  
+  result <-returns[, .(mean_ret = mean(get(ret_name)) * 12,
+              vol = sd(get(ret_name)) * sqrt(12),
+              skewness = skewness(log(1+get(ret_name)+Rf))), by = decile][, sr := mean_ret/vol]
+  
+  result <- t(result)
+  result <- result[c(2,3,5,4), ]
+  colnames(result) <- c(paste0("Decile ", 1:10), "WML")
+  rownames(result) <- c("Mean Excess Return", "Standard Deviation", "Sharpe Ratio", "Skewness(m)") 
+  return(result)
+}
+
+
+t(summary_ret(res, 'size_ret')) %>% tbl_disp
+```
+
+The correlation between the replicated portfolio and the one obtain from the KRF's website is shown below for each decile:
+```{r}
+corr_summ <- function(return_tbl, krf, ret_col_name, krf_col_name){
+  ret <- copy(return_tbl)
+  KRF_Ret <- copy(krf)
+  cor_mat = matrix(0, ncol = 2, nrow = 11)
+  
+  #filter out dates
+  start_date = "1973-01-01"
+  end_date = "2019-12-31"
+  ret = ret[data.table::between(make_date(Year, Month, 1), start_date, end_date)]
+  KRF_Ret = KRF_Ret[data.table::between(make_date(Year, Month, 1), start_date, end_date)]
+  
+  setorder(ret, decile, Year, Month)
+  setorder(KRF_Ret, decile, Year, Month)
+  
+  cor_mat = matrix(0, nrow = 11, ncol = 1)
+  
+  for(i in 1:11){
+    cor_mat[i,1] = cor(ret[decile == i, get(ret_col_name)], KRF_Ret[decile == i, get(krf_col_name)])
+  }
+  
+  
+ cor_mat = t(cor_mat)
+ rownames(cor_mat) <- c("Portfolio")
+ colnames(cor_mat) <- c(paste0("Decile ", 1:10), "WML")
+ return(cor_mat) 
+  
+}
+
+t(corr_summ(res, krf_size, "size_ret", "size_ret")) %>% tbl_disp
+```
+As seen from the above table, the correlation is very close to 1 and the replicated portfolio is very close to the Size Portfolio from the actual KRF.
+
+### Question 3. B/M Decile
+For the B/M decile the annualized average excess returns, volatility, SR and skewness is shown below:
+```{r}
+t(summary_ret(res, 'bm_ret')) %>% tbl_disp
+```
+
+The correlation between the replicated portfolio and the one obtain from the KRF's website is shown below for each decile:
+```{r}
+t(corr_summ(res, krf_bm, "bm_ret", "bm_ret")) %>% tbl_disp
+```
+Similarly, the correlation is pretty close to 1, although for some of the deciles the correlation is a lot less. This could be cause by the treatment of the boundary ranking discussed above as well as that I have not used Davis, Fama and French (2000)'s data to fill in missing historical book equity value.
+
+
+### Question 4. Value and Size Anomaly
+```{r}
+plot_df <- copy(res)
+plot_df[, date := make_date(Year, Month, 1)]
+setorder(plot_df, decile, date)
+plot_df[order(decile, date), cumret := log(cumprod(1 + size_ret)), by = .(decile)]
+
+ggplot()+
+  geom_line(aes(x = date, y = cumret, color = factor(decile) ), data = plot_df[decile %in% c(1,10)]) +
+  theme_bw() + ggtitle("Size Decile 10 and 1") + xlab("Date") + ylab("Log Cumulative Return") + 
+  scale_color_manual(name = "decile", values =c("black","blue"))
+```
+Looking at the plot above, the size anomaly has not been working very well for the past few years as the spread between the decile 10 portfolio and decile 1 portfolio is almost non-existent. Furthermore, the WML portfolio also exhibits negative skewness as seen from the table above on the size return for the sample period considered.
+
+```{r}
+plot_df <- copy(res)
+plot_df[, date := make_date(Year, Month, 1)]
+setorder(plot_df, decile, date)
+plot_df[order(decile, date), cumret := log(cumprod(1 + bm_ret)), by = .(decile)]
+
+ggplot()+
+  geom_line(aes(x = date, y = cumret, color = factor(decile) ), data = plot_df[decile %in% c(1,10)]) +
+  theme_bw() + ggtitle("BM Decile 10 and 1") + xlab("Date") + ylab("Log Cumulative Return") + 
+  scale_color_manual(name = "decile", values =c("black","blue"))
+```
+Looking at the plot above, the value anomaly is still working pretty well for the past few years. The BM decile 10 has been consistently outperforming the BM decile 1 and thus doing a WML portfolio will result in positive average returns. Furthermore, as seen from the table above of the summary statistics the WML portfolio of using BM has positive skewness.
+
+
+### Question 5. HML SMB Portfolios
+For the SMB portfolios the annualized average excess returns, volatility, SR and skewness is shown below:
+```{r}
+summary_ret(res, 'smb_ret')[,1]
+```
+and for the HML portfolio: \ 
+```{r}
+summary_ret(res, 'hml_ret')[,1]
+```
+
+The correlation between the replicated SMB factor with the one from KRF website is : \
+```{r}
+krf_smb_hml <- krf_smb_hml[between(make_date(Year, Month, 1), "1973-01-01", "2019-12-31")]
+res_smb_hml <- res[data.table::between(make_date(Year, Month, 1), "1973-01-01", "2019-12-31")]
+cor(res_smb_hml[decile == 1][order(Year,Month)][,smb_ret], krf_smb_hml[order(Year,Month)][,SMB])
+```
+whereas the correlation between the replicated HML factor with the one from KRF website is : \
+
+```{r}
+cor(res_smb_hml[decile == 1][order(Year,Month)][,hml_ret], krf_smb_hml[order(Year,Month)][,HML])
+```
+The correlation for the replaction HML factor is a quite bit lower, and this could be caused by the treatment of the boundary ranking discussed above again and that I have not used Davis, Fama and French (2000)'s data to fill in missing historical book equity value.
+
+```{r}
+plot_df <- copy(df_smb_hml)
+plot_df[, date := make_date(Year, Month, 1)]
+setorder(plot_df, date)
+plot_df[order(date), cumret := log(cumprod(1 + smb_ret))]
+
+ggplot()+
+  geom_line(aes(x = date, y = cumret), data = plot_df) +
+  theme_bw() + ggtitle("SMB Factor Cumulative Returns") + xlab("Date") + ylab("Log Cumulative Return")
+
+```
+The SMB factor has not been consistent across time as of recently as seen from the cumulative plot of the SMB factor returns above.
+
+```{r}
+plot_df <- copy(df_smb_hml)
+plot_df[, date := make_date(Year, Month, 1)]
+setorder(plot_df, date)
+plot_df[order(date), cumret := log(cumprod(1 + hml_ret))]
+
+ggplot()+
+  geom_line(aes(x = date, y = cumret), data = plot_df) +
+  theme_bw() + ggtitle("HML Factor Cumulative Returns") + xlab("Date") + ylab("Log Cumulative Return")
+```
+Whereas, the HML factor been quite consistent across time as can be seen from the cumulative plot of the HML factor returns above. However, the HML factor seems to also be declining by quite a bit as of recently.
+
+### Question 6.
+As seen above, using the factor portfolios instead of the characteristic portfolios result in a lower standard deviation of returns, higher sharpe ratio and lower skewness. The factor portfolios HML and SMB result both have higher sharpe rations than the WML portfolios of either the size/BM portfolio. Similarly, the average excess returns for the factor portfolios are both higher and they also have lower standard deviation, and thus the factor portfolios performed better during the sample period than the WML portfolios of the characteristic portfolios.
+
+
+

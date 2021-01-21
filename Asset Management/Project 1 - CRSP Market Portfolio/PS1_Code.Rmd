@@ -1,0 +1,180 @@
+---
+title: "Problem Set 1"
+output: pdf_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = F, message = F, warning = F)
+require(data.table)
+require(moments)
+require(zoo)
+require(dplyr)
+require(kableExtra)
+```
+
+### Niko Hiananto
+
+## Question 1. Replicating Value-Weighted Portfolio Returns
+```{r}
+#set wd
+setwd('C:/Users/nhian/Documents/UCLA MFE/Spring 2020/Quantitative Asset Management/Week 1/HW 1')
+#load crsp data
+crsp = as.data.table(read.csv("f18923fa0b0add4a.csv", stringsAsFactors = F))
+#load fama french data
+ff = as.data.table(read.csv("F-F_Research_Data_Factors.CSV", stringsAsFactors = F, skip = 3, nrows = 1122))
+
+
+PS1_Q1 <- function(crsp){
+
+  #common shares & NYSE, NYSE-A, NASDAQ
+  crsp = crsp[EXCHCD %in% c(1,2,3) & SHRCD %in% c(10,11),]
+
+  #filter out when return is not available
+  crsp[, `:=`(RET = ifelse(RET %in% c("E","D","C","B","A"), NA, as.numeric(RET)),
+              DLRET = ifelse(DLRET %in% c("S","T","A","P"), NA, as.numeric(DLRET)) 
+              )]
+  
+  #date data type, add market value columns
+  crsp[,`:=`(date = as.Date(date),
+             MV = abs(PRC) * SHROUT)]
+  
+  #add return columns
+  crsp[, TOTRET := ifelse(is.na(RET),
+                          ifelse(is.na(DLRET), 0, DLRET),
+                          ifelse(is.na(DLRET), RET, (1+RET)*(1+DLRET) - 1))]
+  
+  #set order
+  setkey(crsp, PERMNO, date)
+  setorder(crsp, PERMNO, date)
+  crsp[order(PERMNO, date),Stock_lag_MV := shift(MV, 1, 'lag'), by = PERMNO]
+  
+  #delete NA's
+  crsp = crsp[!is.na(PRC) & !is.na(Stock_lag_MV)]
+  
+  #create return columns
+  res = crsp[,.(
+          Stock_Ew_Ret = mean(TOTRET),
+          Stock_Vw_Ret = weighted.mean(TOTRET, fcoalesce(Stock_lag_MV,0)),
+          Stock_lag_MV = sum(fcoalesce(Stock_lag_MV,0))), by=.(date)]
+  
+  
+  res[,`:=`(year = year(date),
+            month = month(date))]
+  
+  res = res[,.(year, month, Stock_Ew_Ret, Stock_Vw_Ret, Stock_Vw_Ret)]
+  
+  return(res)
+}
+
+
+Q1_result <- PS1_Q1(crsp)
+
+```
+To replicate the value-weighted market returns using CRSP data, several data cleaning processes have been done. The sample period chosen for replication is the period of January 1926 - December 2019. \
+1. Universe of Stocks: The sample has been restricted to only include common shares (SHRCD = 10 and 11) and will also be restricted to securities traded on the New York Stock Exchange, American Stock Exchange, and NASDAQ (EXCHCD = 1, 2, and 3) \
+2. Missing Returns: The data contains missing returns specifically for RET with the characters (E, D, C, B, A), are treated as they are missing and will be considered to have 0 return. The characters represent no listing information, no valid previous prices, etc. The universe of stocks that have missing returns are quite small and will be assumed to have negligible impact when replicating the value-weighted returns. \
+3. Delisting return calculation: Similarly, the delisting returns could also be missing and DLRET with the characters (S, T, A, P) will also be considered as missing and will be assumed to have 0 return. \
+4. Total return calculation: To calculate the total monthly return for each stock I will consider both returns (with dividends) and total delisting returns (with dividends). More specifically, if both the returns and delisting-returns are not missing then I will add both returns in the calculation to calculate the total return, if the returns are not missing and the delisting returns are missing I will only use the returns, and finally if the returns are missing and the delisting returns are not, I will only use the delisting returns. \
+5. Market Capitalization Calculation: Several prices in the data are reported as negative which indicates that the prices are stale. I will still use the data on stale prices and take the absolute value of the price and calculate market capitalization as usual i.e. Market Cap = Price * Shares Outstanding (|PRC| * SHROUT). The data also contains missing prices, in which case, I will delete those stock data with missing prices. Finally, I will also create an additional variable called lagged market capitalization which measures the previous period's market capitalization for that PERMNO. I will also only consider the data with non-missing lagged market capitalization variable as the lagged variable is needed to replicate the value-weighted portfolio return. \
+6. Portfolio Weights: The equal-weighted portfolio return is calculated as the sum of all the firms' total return for that month divided by the number of existing firms (with non-missing prices and lagged market cap) for that month. Hence, the portfolio weights for the equal-weighted portfolio return changes depending on the amount of firms that exist for that month. The value-weighted portfolio return is calculated as the weighted mean of all the firms' returns using the lagged market capitalization variable (again only considering firms with non-missing prices and lagged market cap). The lagged variable is used instead of the current value of the market cap variable is used to avoid forward-looking bias. \
+7. Sample Period: The sample period considered for the replication strategy is for the period of January 1926 - December 2019. 
+
+\newpage
+## Question 2. Moments Fama-French v. Replication
+
+```{r}
+PS1_Q2 <- function(mthly_crsp_ret, ff){
+  
+  
+  #ff excess returns
+  ff_ret = ff[, .(excess = (Mkt.RF)/100)][[1]]
+  
+  #calculate moments function
+  moments <- function(ret){
+    results = c("mean" = mean(ret)* 12,
+              "volatility" = sd(ret) * sqrt(12),
+              "sharpe" = mean(ret)*12 / (sd(ret) * sqrt(12)),
+              "skewness" = skewness(ret),
+              "kurtosis" = kurtosis(ret) - 3)
+   return(results) 
+  }
+  
+  #crsp excess returns
+  crsp_ret <- mthly_crsp_ret[,date :=  as.Date(sprintf("%d-%02d-01", year, month), format = "%Y-%m-%d")]
+  
+  setorder(crsp_ret, date)
+  #match date to FF
+  crsp_ret = crsp_ret[order(date) & date >= "1926-07-01" & date <= "2019-12-31", Stock_Vw_Ret] - ff$RF/100
+  
+  #store data in matrix
+  results = matrix(cbind(moments(ff_ret),moments(crsp_ret)), nrow = 5, ncol = 2,
+                   dimnames = list(c("Annualized Mean", "Annualized Standard Deviation",
+                                     "Annualized Sharpe Ratio", "Skewness", "Excess Kurtosis")
+                                   , c("Estimated FF Market Excess Return", "Actual FF Market Excess Return")))
+  
+  return(results)
+}
+
+Q2_result <- PS1_Q2(Q1_result, ff)
+
+```
+
+The resulting moments for the Fama-French portfolio and the replicated actual market excess return is summarised by the table below. I have reported the following five statistics: annualized mean, annualized standard deviation, annualized sharpe ratio, skewness and excess kurtosis. The first column shows the statistics for the Fama-French's value-weighted portfolio return of stocks and the second column shows the statistics for the replicated value-weighted market portfolio of stocks calculated in Question (1).
+
+```{r}
+
+kable(Q2_result, align = c('c','c'), digits = 4) %>% kable_styling(latex_options = c("hold_position","striped"))
+```
+From Question (1) we can obtain the replicated value-weighted market portfolio of stocks and using the Fama-French's portfolio return of stocks we will have 2 monthly time-series of value-weighted market returns and the summary statistics can then be calculated as follows: \
+1. Sample Period: Monthly from July 1926 to December 2019 \
+2. Skewness: The excess skewness is calculated directly from the monthly time-series excess returns from both portfolios using the full sample \
+3. Excess Kurtosis: Similarly, the excess kurtosis is also calculated directly from both of the monthly time-series excess returns using the full sample \
+4. Annualized Mean: The annualized mean is calculated by taking the monthly average of the monthly time-series excess returns and is arithmetically annualized by multiplying it by 12. \
+\begin{align*}
+\bar\mu &= \frac{1}{T}\Sigma_{i=1}^T r_i \\
+\mu_A &= \bar\mu * 12 \\
+\end{align*}
+5. Annualized Standard Deviation: The annualized standard deviation is calculated by calculating the monthly standard deviation of the monthly time-series excess returns and is arithmetically annualized by multiplying it by $\sqrt{12}$. \
+\begin{align*}
+\sigma_M &= \sigma(\Sigma_{i=1}^T r_i) \\
+\sigma_A &= \sigma_M * \sqrt{12} \\
+\end{align*}
+6. Sharpe Ratio: The sharpe ratio reported is annualized and is calculated as the annualzed excess returns divided by the annualized standard deviation of both series \
+\begin{align*}
+SR_A &= \frac{\mu_A}{\sigma_A} \\
+\end{align*}
+where $\mu_A$ and $\sigma_A$ are defined as above.
+
+\newpage
+## Question 3. Correlation
+The table below reports the correlation between the replicated and the Fama-French's value-weighted portfolio as well as the maximum absolute difference between the two monthly time-series for the period of July 1926 - December 2019.
+
+```{r}
+
+PS1_Q3 <- function(mthly_crsp_ret, ff){
+  
+  #ff_ret
+  ff_ret = ff[, .(a = (Mkt.RF + RF)/100)][[1]]
+  
+  #add date
+  crsp_ret <- mthly_crsp_ret[,date :=  as.Date(sprintf("%d-%02d-01", year, month), format = "%Y-%m-%d")]
+  crsp_ret <- crsp_ret[order(date) & date >= "1926-07-01" & date <= "2019-12-31", Stock_Vw_Ret]
+  
+  # diff <- as.data.frame(cbind(ff[,1], ff_ret - crsp_ret))
+  # colnames(diff) <- c("date","diff")
+  
+  #correlation
+  return(c("Correlation" = cor(crsp_ret , ff_ret),
+           "Maximum Absolute Difference" = abs(max(crsp_ret-ff_ret))) )
+}
+
+
+Q3_result <- PS1_Q3(Q1_result, ff)
+kable(Q3_result, col.names = "Return Series")%>% kable_styling(latex_options = c("hold_position","striped"))
+```
+As seen from the table above, the correlation is very close to 1 but not exactly. The minor difference is most likely caused by the different assumptions that are used to construct the replicating portfolio returns, i.e. the way I have handled missing prices and/or missing lagged stock market values might be different than FF's assumptions on dealing with missing datas. Similarly, the assumptions I have used to calculate total return from returns and delisting returns might also be different than the one used to construct the FF's portfolio. The difference is very small, and can be considered as economically negligible as the correlation is really close to one, furthermore, all the moments computed in question (2) are also very similar to the actual FF's portfolio.
+
+
+

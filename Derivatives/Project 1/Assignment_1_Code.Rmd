@@ -1,0 +1,744 @@
+---
+title: COMPUTER ASSIGNMENT
+author: GOURPRABH, NIKO HIANANTO, SANKET ABHYANKAR, TINGTING ZHOU
+output: pdf_document
+header:
+  - \usepackage{amsmath}
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = F)
+options(knitr.kable.NA = '')
+require(tidyverse)
+require(kableExtra)
+require(knitr)
+```
+
+
+```{r}
+
+tree <- function(s, k, payoff_FUN, r, h, u, d, n, type = 'e'){
+
+  # s = stock price
+  # payoff_FUN = payoff function pass thru
+  # r = interest rate
+  # h = length of each period
+  # u = up factor
+  # d = down factor
+  # n = # of periods
+  # type = option type "a" or "e" american/european respectively
+  
+  #create pricing function
+  prc <- function(r, pu, pd, u, d, s, h = h){
+    p = (exp(r*h)-d)/(u-d)
+    prc = exp(-r*h) *(pu *p  + pd * (1-p))
+    delta = (pu-pd)/(s * (u-d))
+    bond = exp(-r*h) *(pd*u - pu*d)/(u-d)
+    return(c(prc, delta, bond))
+  }
+  
+  n = n + 1
+  ones = matrix(rep(1, n*n), ncol = n)
+  
+  #create up matrix
+  up = ones
+  up[lower.tri(ones, T)] = 0
+  up = t(apply(up, 1, cumsum))
+  
+  #down matrix
+  down = diag(c(0,seq(1,n-1)))
+  down = t(apply(down, 1, cumsum))
+  
+  #stock path matrix
+  mat = s * u^up * d^down
+  mat[lower.tri(mat, F)] = 0
+  
+  #placeholders
+  pl_mat = matrix(rep(0,n*n),ncol =n)
+  opt_mat = delta_mat = bond_mat = matrix(rep(0,(n-1)*(n-1)),ncol = (n-1))
+  
+  #set last path of payoff matrix as the payoff of the last stock paths
+  pl_mat[,n] = mat[,n]
+  pl_mat[,n] = payoff_FUN(pl_mat[,n],k)
+  
+  #loop through the last columns
+  for(j in (dim(mat)[2]-1):1){ #from last column - 1 : 1
+    
+    #loop through the rows (1 to j); no. rows decreasing every period by 1 (recombining tree)
+    for(i in 1 : j){
+      #for each row calculate the price, delta and bond using the prc function
+      #pu is the up payoff defined as the next column and the same row
+      #pd is the down payoff defined as the next column and the next row
+      #mat[i,j] is the current stock price
+      
+      val = prc(r, pu = pl_mat[i,j+1], pd = pl_mat[i+1,j+1], u, d, s = mat[i,j], h)
+      
+      if(tolower(type) == 'a'){ #american option
+        
+        #max of exercise that date or value
+        pl_mat[i,j] = max(payoff_FUN(mat[i,j], k) , val[1]) 
+        if(payoff_FUN(mat[i,j], k) > val[1]) opt_mat[i,j] = 1
+        
+      } else if(tolower(type) == 'e'){#european option
+        #simply the intrinsic value
+        pl_mat[i,j] = val[1]
+      } else{
+        stop('choose correct option type')
+      }
+      
+      
+      delta_mat[i,j] = val[2]
+      bond_mat[i,j] = val[3]
+      
+      
+    }
+  }
+  
+  return(list("stock" = mat, "payoff" = pl_mat, "delta" = delta_mat, "bond" = bond_mat, "optimal" = opt_mat))
+}
+
+#create common option payoff functions (vectorized)
+straddle_payoff <- function(s, k){
+  sapply(s, function(x) max(x-k,k - x))
+}
+
+binary_call <- function(s, k){
+  sapply(s, function(x) ifelse(x > k, 1, 0))
+}
+
+
+call_payoff <- function(s,k){
+  sapply(s, function(x) max(x-k,0))
+}
+
+put_payoff <- function(s, k){
+  sapply(s, function(x) max(k-x,0))
+}
+```
+
+```{r}
+output_table <- function(matrix, colnames, align = NULL, caption = NULL, ...){
+  dim = dim(matrix)
+  tbl = matrix
+  colnames(tbl) <- colnames
+  tbl %>% kable(caption = caption, align = align, ...) %>% 
+    kable_styling(latex_options = c("hold_position","striped", "scale_down"), full_width = T)
+}
+```
+### 1. Bloomberg Screencut
+#### QUESTION 1
+
+```{r,echo=FALSE,fig.width=8,fig.height=6}
+library(kableExtra)
+knitr::include_graphics("C:\\Users\\13105\\Documents\\2020winter\\Derivatitives\\computerassignment\\Q1.png",dpi = 100)
+```
+\newline
+
+We can observe that for the same maturity, as the strike price is inceased, the call option price decreases and the put option value increases. For example, for 10 day maturity, as we increase the strike price from 47 to 47.5, we can see that the call ask price decreases from 1.35 to 0.96 while the put ask price increases from 0.19 to 0.30. One explanantion for this is as the strike price is increased , the call option has less payoff while the put option has more payoff.  
+
+Also, we can observe that for the same exercise price, as the maturity is inceased, both the call option price and the put option value increases. For example, for strike price $47.5, as we increase the maturity from 10d to 38d, we can see that the call ask price increases from 0.96 to 1.57 while the put ask price increases from 0.30 to 0.84. One explanantion for this is as the maturity is increased , the uncertainty (volatility) effect is bigger than the time value effect and that's why the put price increases too.
+\newpage
+
+#### Question 2  
+
+```{r,echo=FALSE}
+library(kableExtra)
+knitr::include_graphics("C:\\Users\\13105\\Documents\\2020winter\\Derivatitives\\computerassignment\\Q2.png")
+```
+\newline
+
+We can see that the vega of the straddle is 0.73 which means for a \$1 change in implied volatility, the straddle price will change by \$0.73. That means the straddle price is sensitive to the volatility of the underlying asset. and we usually gain profit from a straddle under a market with huge volatility. \newpage
+
+
+#### Question 3  
+
+```{r,echo=FALSE}
+knitr::include_graphics("C:\\Users\\13105\\Documents\\2020winter\\Derivatitives\\computerassignment\\Q3-1.png")
+```
+\newline
+
+We observe that the last price for Mar20 price is $3361$,  that is, the S&P index is expected to decrease a little bit, but basically the same. Also, the open interest for Mar20 futures is huge, but for Jun20 is pretty small, indicating the liquidity of Mar20 is higher and its demand is huge. 
+```{r,echo=FALSE}
+knitr::include_graphics("C:\\Users\\13105\\Documents\\2020winter\\Derivatitives\\computerassignment\\Q3-3.png")
+```
+\newline
+
+We pay our attention to the margin to the margin requirement, and find that the margin requirement for the speculators is higher than hedgers'. Since speculators are more risky investors, the broker tends to ask for a higher margin.
+\newpage 
+
+#### Question 4 
+
+```{r,echo=FALSE}
+knitr::include_graphics("C:\\Users\\13105\\Documents\\2020winter\\Derivatitives\\computerassignment\\Q4-1.png")
+```
+
+The natural gas option market appears to be a efficient market, beacuse we can tell that this market has low transation cost ith low bid-ask spread, and since the trading volum is huge, it shows high liquidity.
+
+```{r,echo=FALSE}
+knitr::include_graphics("C:\\Users\\13105\\Documents\\2020winter\\Derivatitives\\computerassignment\\Q4-2.png")
+```
+\newline
+We observe that there is no upper price limits and the lower limit is just 0.01, also the 52 week highest and lowest shows big difference, indicating the commodity market high volatility.
+
+### 2. European Options
+#### Question 1.
+Straddle with T = 4, r = 0.02, h = 0.25, u = $e^{rh + 0.2\sqrt(h)}$, d = $e^{rh - 0.2\sqrt(h)}$, $S_0$ = 100 and K = 90.
+```{r}
+n = 4
+r = 0.02
+h = 0.25
+u = exp(r * h + 0.2 *sqrt(h))
+d = exp(r * h - 0.2 *sqrt(h))
+s = 100
+k = 90
+
+straddle_1 = tree(s = s, k = k, straddle_payoff, r = r, h = h, u = u, d = d, n = n, type = 'e')
+straddle_1$payoff[1,1]
+```
+
+The composition of stock for each period is shown in the table below
+```{r}
+delta_print = straddle_1$delta
+delta_print[lower.tri(delta_print, F)] = NA
+delta_print %>% 
+  output_table(seq(dim(straddle_1$delta)[2]), digits = 3, caption = "Option Delta", align = rep("c", dim(straddle_1$delta)[2]))
+```
+
+And the bond composition at each node is given in the table below
+```{r}
+bond_print = straddle_1$bond
+bond_print[lower.tri(bond_print, F)] = NA
+bond_print %>% 
+  output_table(seq(dim(straddle_1$bond)[2]), digits = 3, caption = "Option Bond", align = rep("c", dim(straddle_1$bond)[2]))
+```
+
+
+
+#### Question 2
+Straddle with T = 40, r = 0.02, h = 0.025, u = $e^{rh + 0.2\sqrt(h)}$, d = $e^{rh - 0.2\sqrt(h)}$, $S_0$ = 100 and K = 90.
+```{r}
+n = 40
+r = 0.02
+h = 0.025
+u = exp(r * h + 0.2 *sqrt(h))
+d = exp(r * h - 0.2 *sqrt(h))
+s = 100
+k = 90
+
+straddle_2 = tree(s = s, k = k, straddle_payoff, r = r, h = h, u = u, d = d, n = n, type = 'e')
+straddle_2$payoff[1,1]
+```
+
+The composition of stock for the first 5 periods is shown in the table below
+```{r}
+#subset first 5
+delta_print = straddle_2$delta[1:5,1:5]
+delta_print[lower.tri(delta_print, F)] = NA
+delta_print %>% 
+  output_table(seq(dim(delta_print)[2]), digits = 3, caption = "Option Delta", align = rep("c", dim(delta_print)[2]))
+```
+
+And the bond composition at each node is given in the table below
+```{r}
+#subset first 5
+bond_print = straddle_2$bond[1:5, 1:5]
+bond_print[lower.tri(bond_print, F)] = NA
+bond_print %>% 
+  output_table(seq(dim(bond_print)[2]), digits = 3, caption = "Option Bond", align = rep("c", dim(bond_print)[2]))
+```
+
+
+
+#### Question 3.
+Binary call option with T = 4, r = 0.02, h = 0.25, u = $e^{rh + 0.2\sqrt(h)}$, d = $e^{rh - 0.2\sqrt(h)}$, $S_0$ = 100 and K = 90.
+```{r}
+n = 4
+r = 0.02
+h = 0.25
+u = exp(r * h + 0.2 *sqrt(h))
+d = exp(r * h - 0.2 *sqrt(h))
+s = 100
+k = 90
+
+binary_call = tree(s = s, k = k, binary_call, r = r, h = h, u = u, d = d, n = n, type = 'e')
+binary_call$payoff[1,1]
+```
+
+The composition of stock for each period is shown in the table below
+```{r}
+delta_print = binary_call$delta
+delta_print[lower.tri(delta_print, F)] = NA
+delta_print %>% 
+  output_table(seq(dim(binary_call$delta)[2]), digits = 3, caption = "Option Delta", align = rep("c", dim(binary_call$delta)[2]))
+```
+
+And the bond composition at each node is given in the table below
+```{r}
+bond_print = binary_call$bond
+bond_print[lower.tri(bond_print, F)] = NA
+bond_print %>% 
+  output_table(seq(dim(binary_call$bond)[2]), digits = 3, caption = "Option Bond", align = rep("c", dim(binary_call$bond)[2]))
+```
+
+
+### 3. American Tree
+American put with T = 250, h = 1/365, r = 0.01,  u = $e^{rh + 0.15\sqrt(h)}$, d = $e^{rh - 0.15\sqrt(h)}$, $S_0$ = 10 and K = 10.
+```{r}
+h = 1/365
+n  = 250
+r = 0.01
+u = exp(r * h + 0.15 *sqrt(h))
+d = exp(r * h - 0.15 *sqrt(h))
+s = 10
+k = 10
+
+american_put = tree(s = s, k = k, put_payoff, r = r, h = h, u = u, d = d, n = n, type = 'a')
+american_put$payoff[1,1]
+```
+
+The composition of stock for the first 5 periods is shown in the table below
+```{r}
+#subset first 5
+delta_print = american_put$delta[1:5,1:5]
+delta_print[lower.tri(delta_print, F)] = NA
+delta_print %>% 
+  output_table(seq(dim(delta_print)[2]), digits = 3, caption = "Option Delta", align = rep("c", dim(delta_print)[2]))
+```
+
+And the bond composition at each node is given in the table below
+```{r}
+#subset first 5
+bond_print = american_put$bond[1:5, 1:5]
+bond_print[lower.tri(bond_print, F)] = NA
+bond_print %>% 
+  output_table(seq(dim(bond_print)[2]), digits = 3, caption = "Option Bond", align = rep("c", dim(bond_print)[2]))
+```
+
+
+
+American call with T = 250, h = 1/365, r = 0.01,  u = $e^{rh + 0.15\sqrt(h)}$, d = $e^{rh - 0.15\sqrt(h)}$, $S_0$ = 10 and K = 10.
+```{r}
+n = 250
+h = 1/365
+r = 0.01
+u = exp(r * h + 0.15 *sqrt(h))
+d = exp(r * h - 0.15 *sqrt(h))
+s = 10
+k = 10
+
+american_call = tree(s = s, k = k, call_payoff, r = r, h = h, u = u, d = d, n = n, type = 'a')
+american_call$payoff[1,1]
+```
+The composition of stock for the first 5 periods is shown in the table below
+```{r}
+#subset first 5
+delta_print = american_call$delta[1:5,1:5]
+delta_print[lower.tri(delta_print, F)] = NA
+delta_print %>% 
+  output_table(seq(dim(delta_print)[2]), digits = 3, caption = "Option Delta", align = rep("c", dim(delta_print)[2]))
+```
+
+And the bond composition at each node is given in the table below
+```{r}
+#subset first 5
+bond_print = american_call$bond[1:5, 1:5]
+bond_print[lower.tri(bond_print, F)] = NA
+bond_print %>% 
+  output_table(seq(dim(bond_print)[2]), digits = 3, caption = "Option Bond", align = rep("c", dim(bond_print)[2]))
+```
+
+
+
+### 4. Discrete Dividends
+
+```{r}
+
+tree_div <- function(s, k, payoff_FUN, r, h, u, d, n, div_yield, div_dt, type = 'e'){
+  
+  # s = stock price
+  # k = exercise price
+  # payoff_FUN = payoff function pass thru
+  # r = interest rate
+  # h = length of each period
+  # u = up factor
+  # d = down factor
+  # n = number of periods
+  # type = option type "a" or "e" american/european respectively
+  # div_yield = discrete dividend yield
+  # div_dates = discrete dividend distribution dates
+  
+  prc <- function(r, pu, pd, u, d, s, h = h){
+    p = (exp(r*h)-d)/(u-d)
+    prc = exp(-r*h) *(pu *p  + pd * (1-p))
+    delta = (pu-pd)/(s * (u-d))
+    bond = exp(-r*h) *(pd*u - pu*d)/(u-d)
+    return(c(prc, delta, bond))
+  }
+  #initialize stock paths matrix
+  n = n + 1
+  ones = matrix(rep(1, n*n), ncol = n)
+  
+  #create up matrix
+  up = ones
+  up[lower.tri(ones, T)] = 0
+  up = t(apply(up, 1, cumsum))
+  
+  #create down matrix
+  down = diag(c(0,seq(1,n-1)))
+  down = t(apply(down, 1, cumsum))
+  
+  #create dividend matrix
+  div_dt = div_dt + 1 #add by 1 for indexing
+  div_mat = matrix(rep(0, n*n), ncol = n)
+  div_mat[,div_dt] = 1
+  div_mat = t(apply(div_mat, 1, cumsum))
+  div_mat[lower.tri(div_mat, F)] = 0
+  
+  #create stock paths (with dividends)
+  mat = s * u^up * d^down * (1 - div_yield)^div_mat
+  mat[lower.tri(mat, F)] = 0
+  
+  #placeholders
+  pl_mat = matrix(rep(0,n*n),ncol =n)
+  opt_mat = delta_mat = bond_mat = matrix(rep(0,(n-1)*(n-1)),ncol = (n-1))
+  
+  #end path prices and payoffs
+  pl_mat[,n] = mat[,n]
+  pl_mat[,n] = payoff_FUN(pl_mat[,n],k)
+  
+  #loop from end of column 
+  for(j in (dim(mat)[2]-1):1){
+    #loop through each row
+    
+    for(i in 1 : j){
+      
+      val = prc(r, pu = pl_mat[i,j+1], pd = pl_mat[i+1,j+1], u, d, s = mat[i,j], h)
+      
+      if(tolower(type) == 'a'){
+        
+        pl_mat[i,j] = max(payoff_FUN(mat[i,j], k) , val[1]) #max of exercise that date or value
+        if(payoff_FUN(mat[i,j], k) > val[1]) opt_mat[i,j] = 1
+        
+      } else if(tolower(type) == 'e'){
+        pl_mat[i,j] = val[1]
+      } else{
+        stop('choose correct option type')
+      }
+      delta_mat[i,j] = val[2]
+      bond_mat[i,j] = val[3]
+      
+      
+    }
+  }
+  
+  return(list("stock" = mat, "payoff" = pl_mat, "delta" = delta_mat, "bond" = bond_mat, "optimal" = opt_mat))
+}
+
+```
+
+#### Question 1.
+American put with dividends
+```{r}
+k = 10
+r = 0.02
+s = 10
+h = 1/365
+u = exp(0.2 * sqrt(h))
+d = 1/u
+n = 200
+div_dt = c(50, 100, 150)
+delta = 0.05
+
+american_put_div = tree_div(s = s, k = k, put_payoff, r = r, h = h, u = u, d = d, n = n, div_yield = delta, div_dt = div_dt,'a')
+american_put_div$payoff[1,1]
+```
+
+The composition of stock for the first 5 periods is shown in the table below
+```{r}
+#subset first 5
+delta_print = american_put_div$delta[1:5,1:5]
+delta_print[lower.tri(delta_print, F)] = NA
+delta_print %>% 
+  output_table(seq(dim(delta_print)[2]), digits = 3, caption = "Option Delta first 5 periods", align = rep("c", dim(delta_print)[2]))
+```
+
+And the bond composition at each node is given in the table below
+```{r}
+#subset first 5
+bond_print = american_put_div$bond[1:5, 1:5]
+bond_print[lower.tri(bond_print, F)] = NA
+bond_print %>% 
+  output_table(seq(dim(bond_print)[2]), digits = 3, caption = "Option Bond first 5 periods", align = rep("c", dim(bond_print)[2]))
+```
+
+
+American call with dividends
+```{r}
+k = 10
+r = 0.02
+s = 10
+h = 1/365
+u = exp(0.2 * sqrt(h))
+d = 1/u
+n = 200
+div_dt = c(50,100,150)
+delta = 0.05
+
+american_call_div = tree_div(s = s, k = k, call_payoff, r = r, h = h, u = u, d = d, n = n, div_yield = delta, div_dt = div_dt,'a')
+american_call_div$payoff[1,1]
+```
+
+The composition of stock for the first 5 periods is shown in the table below
+```{r}
+#subset first 5
+delta_print = american_call_div$delta[1:5,1:5]
+delta_print[lower.tri(delta_print, F)] = NA
+delta_print %>% 
+  output_table(seq(dim(delta_print)[2]), digits = 3, caption = "Option Delta first 5 periods", align = rep("c", dim(delta_print)[2]))
+```
+
+And the bond composition at each node is given in the table below
+```{r}
+#subset first 5
+bond_print = american_call_div$bond[1:5, 1:5]
+bond_print[lower.tri(bond_print, F)] = NA
+bond_print %>% 
+  output_table(seq(dim(bond_print)[2]), digits = 3, caption = "Option Bond first 5 periods", align = rep("c", dim(bond_print)[2]))
+```
+
+
+
+#### Question 2.
+American straddle with dividends
+```{r}
+k = 10
+r = 0.02
+s = 10
+h = 1/365
+u = exp(0.2 * sqrt(h))
+d = 1/u
+n = 200
+div_dt = c(50, 100, 150)
+delta = 0.05
+
+american_straddle_div = tree_div(s = s, k = k, straddle_payoff, r = r, h = h, u = u, d = d, n = n, div_yield = delta, div_dt = div_dt,'a')
+american_straddle_div$payoff[1,1]
+```
+
+```{r}
+matrix(c(american_straddle_div$payoff[1,1],
+       american_put_div$payoff[1,1],
+       american_call_div$payoff[1,1],
+       american_put_div$payoff[1,1] + american_call_div$payoff[1,1]), ncol = 1, dimnames = list(c("Straddle", "Put","Call","Call + Put"))) %>% 
+  output_table(colnames = c("Price"), caption = "American Straddle v. Call + Put", digits = 5, align = "c")
+```
+As seen on the table above the price of an American Straddle is lower than the price of the American Call & Put combined. This is because when you exercise an American Straddle you have to exercise both at the same time whereas buying an American Call & Put allows you to exercise the different options at different dates.
+
+\newpage
+### 5. Monte Carlo
+```{r}
+t = 1
+k = 220
+sigma = 0.2
+n = 365
+h = t/n
+s0 = 200
+r = 0.02
+paths = 100000
+sim = matrix(0, ncol = n+1, nrow = paths)
+sim[,1] = s0
+for(i in 2:dim(sim)[2]){
+  #assumge GBM stock price - path follows S_0 * exp((r - sigma^2)h + sigma * sqrt(h) * Z)
+  sim[,i] = sim[,i-1] * exp((r - 0.5 * sigma^2)*h  + rnorm(dim(sim)[1],0, sigma) * sqrt(h))
+}
+```
+
+The price of the Asian option using the Monte Carlo simulation is given by
+```{r}
+res = apply(sim, 1, function(x) max(mean(x) - k, 0 ))
+y = mean(res)
+y
+```
+
+and the 95% confidence interval (using the t-distribution) of the price is
+```{r}
+err <- qt(0.975,paths -2) * sd(res)/sqrt(paths)
+conf = c(y - err, y, y + err)
+
+matrix(conf, nrow = 1) %>% 
+  output_table(colnames = c("Lower","Predicted","Upper"), caption = "Price Confidence Interval",  align = rep("c",3))
+```
+
+
+\newpage
+### 6. Pricing an American Option with Longstaff and Schwartz Least-Square Method
+
+```{r}
+sim_path <- function(s, sigma, steps, path_amt, t){
+  paths = path_amt
+  sim_stock_path = matrix(0, ncol = steps+1, nrow = path_amt)
+  sim_stock_path[,1] = s
+  h = t/steps
+  for(i in 2:dim(sim_stock_path)[2]){
+    sim_stock_path[,i] = sim_stock_path[,i-1] * exp((r - 0.5 * sigma^2)*h  + rnorm(dim(sim_stock_path)[1],0, sigma) * sqrt(h))
+  }
+  return(sim_stock_path)
+}
+
+regress <- function(s, k, payoff_FUN, r, sigma, t, steps, path_amt){
+  
+  sim_stock_path = sim_path(s = s, sigma = sigma, steps = steps, path_amt = path_amt, t = t)
+  # sim_stock_path = test
+  
+  #cf matrix
+  cf_mat = matrix(0, ncol = steps, nrow = path_amt)
+  
+  #helper params
+  dim = dim(cf_mat)
+  h = t/steps
+  disc_rate = exp(-r * h)
+  
+  #initialize last cash flow matrix values
+  cf_mat[,dim[2]] = put_payoff(sim_stock_path[,ncol(sim_stock_path)], k)
+  
+  #set discount vectors
+  disc_vec = disc_rate ^ (1:steps)
+  
+  #loop through and run regression
+  for(i in (steps-1): 1){ #col 1 = initial stock value
+    #current stock price
+    X = sim_stock_path[,i+1] #sim stock path matrix has s_0, add 1 to col index
+    #value if exercise
+    ex = put_payoff(X, k)
+    #itm indicator
+    itm = ifelse(ex > 0, 1, NA)
+    
+    #value if not exercised
+    pl = cf_mat[,(i+1):dim[2], drop = F] #take future cf matrix
+    NO = t(t(pl) * disc_rate^(1:dim(pl)[2])) #discount future cf's for each path with the disc rate respective for the periods
+    NO = apply(NO, 1, sum) * itm #if not in the money set as NA and compress the matrix to a single vector
+    
+    # run regress
+    # out = lm(NO ~ X + I(X^2), na.action = na.omit)
+    #expected value
+    # expected_val = predict(out, newdata = data.frame(X)) * coalesce(itm, 0)
+    
+    # only regress on paths that are in the money at that time
+    itm_NO = NO[!is.na(itm)]
+    if(length(itm_NO) > 0){
+      #run regress
+      out = lm(NO ~ X + I(X^2), na.action = na.omit)
+      #expected value
+      expected_val = predict(out, newdata = data.frame(X)) * coalesce(itm, 0) #set other expected value to 0 if it's not itm
+    } else{#if no paths are itm
+      warning(c("No paths are ITM at step",i))
+      expected_val = 0
+    }
+    
+    
+    #update cf matrix and optimal matrix if current exercise value > expected value from regression
+    cf_mat[, i] = ex * (ex > expected_val) #set current cf as exercise value if ex > expected value
+    cf_mat[c(ex>expected_val), (i+1):dim[2]] = 0 #set future cf as 0 if current exercise value > expected value from regression
+    
+  }
+  
+  
+  prc = mean(apply(t(t(cf_mat) * disc_vec), 1, sum))
+  
+  return(prc)
+}
+
+```
+
+
+
+#### Question 1.
+American Put Option N = 250, and paths = 100,000
+```{r}
+s = 200
+r = 0.1
+sigma = 0.3
+k = 220
+t = 1
+n = 250
+paths = 100000
+
+regress(s = s, k = k, put_payoff, r = r, sigma = sigma, steps = n, path_amt = paths, t = t)
+```
+
+#### Question 2.
+Number of paths of 10, 100, 1,000, 10,000, and 100,000.
+```{r}
+s = 200
+r = 0.1
+sigma = 0.3
+k = 220
+t = 1
+n = 250
+paths = c(10,100,1000,10000,100000)
+
+path_var = sapply(paths, function(x) regress(s = s, k = k, put_payoff, r = r, sigma = sigma, steps = n, path_amt = x, t = t))
+```
+
+
+```{r}
+s = 200
+r = 0.1
+sigma = 0.3
+k = 220
+t = 1
+n = 250
+paths = 10
+
+regress(s = s, k = k, put_payoff, r = r, sigma = sigma, steps = n, path_amt = paths, t = t)
+```
+
+```{r}
+cbind(paths,path_var) %>%
+  output_table(colnames = c("Paths", "Prices"),caption =  "American Put Prices for Different Path Amounts", align = c("c","c"), digits = 2)
+```
+
+The prices for the American put option for the different paths is shown in the plot below (x is in log scale)
+```{r}
+ggplot() +
+  geom_line(aes(x = c(10,100,1000,10000,100000), y = path_var)) +
+  theme_bw() +
+  ggtitle("American Put Prices for Different Paths") + xlab("Paths") + ylab("Price") +
+  scale_x_continuous(trans = "log10", breaks = c(10,100,1000,10000,100000))
+
+```
+
+\newpage
+#### Question 3.
+Number of paths = 100,000 and steps take values of 3, 10, 100, 250, and 1,000
+```{r}
+s = 200
+r = 0.1
+sigma = 0.3
+k = 220
+t = 1
+n = c(3,10,100,250,1000)
+paths = 100000
+
+steps_var = sapply(n, function(x) regress(s = s, k = k, put_payoff, r = r, sigma = sigma, steps = x, path_amt = paths, t = t))
+```
+
+
+```{r}
+cbind(n,steps_var) %>%
+  output_table(colnames = c("Steps", "Prices"),caption =  "American Put Prices for Steps Amounts", align = c("c","c"), digits = 2)
+```
+
+The prices for the American put option for the different paths is shown in the plot below
+```{r,fig.align="center"}
+ggplot() +
+  geom_line(aes(x = c(3,10,100,250, 1000), y = steps_var)) +
+  theme_bw() +
+  ggtitle("American Put Prices for Different Steps") + xlab("Steps") + ylab("Price") +
+  scale_x_continuous()
+
+```
+
+\newpage
+
+# Appendix

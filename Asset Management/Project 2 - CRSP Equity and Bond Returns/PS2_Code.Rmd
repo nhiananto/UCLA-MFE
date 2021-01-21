@@ -1,0 +1,293 @@
+---
+title: "QAM_Project_2"
+output: pdf_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = F, warning =F)
+require(data.table)
+require(ggplot2)
+require(moments)
+require(kableExtra)
+require(lubridate)
+```
+
+
+```{r}
+#load required initial datasets
+setwd('C:/Users/nhian/Documents/UCLA MFE/Spring 2020/Quantitative Asset Management/HW 2')
+CRSP_Bonds <- as.data.table(read.csv("bond_crsp.csv", stringsAsFactors = F))
+CRSP_Riskless <- as.data.table(read.csv("bond_riskless.csv", stringsAsFactors = F))
+CRSP_Stocks = as.data.table(read.csv("crsp_stocks.csv", stringsAsFactors = F))
+```
+
+
+```{r}
+#create table display function
+tbl_disp <- function(tbl, col.names = colnames(tbl), digits = 5, latex_opts = c("hold_position", "striped")){
+  tbl %>% kable(., col.names = col.names, digits = digits, align = "c") %>% 
+    kable_styling(latex_options = latex_opts)
+}
+
+#create summary statistic function
+summary_stat <- function(ret, na.rm = F){
+      results = c("Annualized Mean" = mean(ret, na.rm = na.rm)* 12,
+                  "t-stat Annualized Mean" = (mean(ret, na.rm = na.rm)) /( (sd(ret, na.rm = na.rm) / sqrt( sum(!is.na(ret)) ) ) ),
+                "Annualized Volatility" = sd(ret, na.rm = na.rm) * sqrt(12),
+                "Annualized Sharpe" = mean(ret, na.rm = na.rm)*12 / (sd(ret, na.rm = na.rm) * sqrt(12)),
+                "Skewness" = skewness(ret, na.rm = na.rm),
+                "Excess Kurtosis" = kurtosis(ret, na.rm = na.rm) - 3)
+     return(results) 
+}
+```
+
+
+### Question 1. CRSP Bond
+```{r}
+PS2_Q1 <- function(CRSP_Bonds){
+  Bonds_data = copy(CRSP_Bonds)
+  
+  #set as date
+  Bonds_data$MCALDT = as.Date(Bonds_data$MCALDT)
+  #change to thousands to match MV of stock later on
+  Bonds_data$TMTOTOUT = as.numeric(Bonds_data$TMTOTOUT)*1000
+  
+  #set -99 as missing returns
+  Bonds_data[TMRETNUA  == -99, TMRETNUA := NA]
+  
+  #create lagged MV
+  Bonds_data[order(MCALDT), Bond_lag_MV := shift(TMTOTOUT), by = KYCRSPID]
+  
+  #create yr month
+  Bonds_data[, `:=`(year = year(MCALDT),
+                    month = month(MCALDT))]
+  #delete data with missing MV
+  Bonds_data = Bonds_data[!is.na(Bond_lag_MV)]
+  
+  #create required variables
+  ret_bonds <- Bonds_data[, .(Bond_Ew_Ret = mean(fcoalesce(TMRETNUA, 0), na.rm = T),
+                              Bond_Vw_Ret = weighted.mean(fcoalesce(TMRETNUA,0), fcoalesce(Bond_lag_MV,0), na.rm = T),
+                              Bond_lag_MV = sum(fcoalesce(Bond_lag_MV,0))),
+                        by = .(year, month)]
+  
+  Monthly_CRSP_Bonds <- ret_bonds
+  
+  return(Monthly_CRSP_Bonds)
+  
+}
+
+Monthly_CRSP_Bonds <- PS2_Q1(CRSP_Bonds)
+
+```
+I have obtained the data for the bond returns from the CRSP Monthly US Treasury Database. The sample period that will be evaluated is from January 1926 - December 2019. \
+1. Market Value/Weights: For the calculation of the value weighted returns, I will be weighting the bonds according to their outstanding face value (TMTOTOUT) that has been lagged by 1 month to prevent a forward bias and to ensure that the strategy is replicable. Furthermore, as the sample data starts from January 1926, by lagging the face value by 1 month, we will have a missing lagged market value for January 1926 and thus will be excluded from the analysis. Finally, I have also excluded records with missing lagged market value (including January 1926), as the variable is needed to do a value-weighted return and as the number of records with missing lagged market are quite small the effect would be negligible. \
+2. Missing Returns: The data contains some missing returns and I have treated TMRETNUA = -99 as missing as well as that code indicates that the price is missing for the month or for the previous month. I have treated the bonds data with missing returns but with non-missing lagged market value data as having the returns to be 0 and have excluded the bonds data with missing returns and missing lagged market value. \
+The summary statistics for the bonds data for the sample period of January 1926 - December 2019 is shown by the below: \
+```{r}
+as.data.frame(lapply(Monthly_CRSP_Bonds[, .(Bond_Ew_Ret, Bond_Vw_Ret)], summary_stat))%>% tbl_disp
+```
+and the sample dataset is shown below: \
+```{r}
+Monthly_CRSP_Bonds[order(year,month)][c(1:5, (.N-5):.N ),] %>% tbl_disp
+```
+
+\newpage
+### Question 2. Data tables Aggregation
+
+```{r}
+PS1_Q1 <- function(crsp){
+  
+  #filter share codes exclude ADRs
+  crsp = crsp[EXCHCD %in% c(1,2,3, 4, 31, 32, 33, 34) & !between(SHRCD, 30,39) & !between(SHRCD, 80,89),]
+  
+  #if return is -99 -> set as missing
+  crsp[RET == -99, RET := NA]
+  
+  #filter out when return is not available
+  crsp[, `:=`(RET = ifelse(RET %in% c("E","D","C","B","A"), NA, as.numeric(RET)),
+              DLRET = ifelse(DLRET %in% c("S","T","A","P"), NA, as.numeric(DLRET)) 
+              )]
+  
+  #date data type, add market value columns
+  crsp[,`:=`(date = as.Date(date),
+             MV = abs(PRC) * SHROUT)]
+  
+  #add return columns
+  crsp[, TOTRET := ifelse(is.na(RET),
+                          ifelse(is.na(DLRET), 0, DLRET),
+                          ifelse(is.na(DLRET), RET, (1+RET)*(1+DLRET) - 1))]
+  
+  #set order
+  setkey(crsp, PERMNO, date)
+  setorder(crsp, PERMNO, date)
+  crsp[order(PERMNO, date),Stock_lag_MV := shift(MV, 1, 'lag'), by = PERMNO]
+  
+  #delete NA's
+  crsp = crsp[!is.na(PRC) & !is.na(Stock_lag_MV)]
+  
+  #create return columns
+  res = crsp[,.(
+          Stock_Ew_Ret = mean(TOTRET),
+          Stock_Vw_Ret = weighted.mean(TOTRET, fcoalesce(Stock_lag_MV,0)),
+          Stock_lag_MV = sum(fcoalesce(Stock_lag_MV,0))), by=.(date)]
+  
+  
+  res[,`:=`(year = year(date),
+            month = month(date))]
+  
+  res = res[,.(year, month, Stock_lag_MV, Stock_Ew_Ret, Stock_Vw_Ret)]
+  
+  return(res)
+}
+
+Monthly_CRSP_Stocks <- PS1_Q1(CRSP_Stocks)
+
+```
+
+
+```{r}
+#2.
+PS2_Q2 <- function(Monthly_CRSP_Stocks, Monthly_CRSP_Bonds, CRSP_Riskless){
+  #reformat as date
+  CRSP_Riskless$caldt = as.Date(as.character(CRSP_Riskless$caldt), format = "%Y%m%d")
+  #add year month columns
+  CRSP_Riskless[,`:=`(year = year(caldt),
+                  month = month(caldt))]
+
+  #combine all 3 tables by year month
+  CRSP_univ <- merge(merge(Monthly_CRSP_Stocks, CRSP_Riskless[,.(year,month,t90ret,t30ret)]
+        , by = c("year","month")), Monthly_CRSP_Bonds, by = c("year","month"))
+  
+  #create required variables
+  #excess returns calculated using shortest t-bill available as the risk-free rate
+  CRSP_univ <- CRSP_univ[,.(year,
+               month,
+               Stock_lag_MV,
+               Stock_Excess_Vw_Ret = Stock_Vw_Ret - t30ret,
+               Bond_lag_MV,
+               Bond_Excess_Vw_Ret = Bond_Vw_Ret - t30ret)]
+  
+  return(CRSP_univ)
+}
+
+CRSP_univ <- PS2_Q2(Monthly_CRSP_Stocks, Monthly_CRSP_Bonds, CRSP_Riskless)
+
+
+```
+I have leveraged the use of PS1_Q1 to create the universe of Monthly CRSP Stocks with some additional assumptions: \
+1. The sample period for the stocks will be the same as the sample period for the CRSP Bonds universe that is January 1926 - December 2019. \
+2. I have included all the share codes in the CRSP Stock except for ADRs (SHRCD 30-39) and SHRCD 80s. Similarly, additional exchange codes EXCHD 4, 31, 32, 33, and 34 have also been included in addition to 1, 2, and 3 originally included.
+3. Returns and market capitalizations are treated with the same assumptions as before. \
+The data for the riskless CRSP bonds have been obtained from the CRSP US Treasury and Inflation Indexes with the 90-day and 30-day T-bill rates. I have included the same sample period for the riskless data as well and that is January 1926 - December 2019. Finally, the data for the CRSP Bond universe is obtained from question (1) alongside the assumptions stated in question (1). \
+To aggregate the 3 data tables, I have merged all 3 datasets with the use of year and month as the joining key. To create the excess return variables, I have substracted the value-weighted return of the stocks and bonds with the 30-day T-bill rate. I have chosen the shorter T-Bill rate as the risk-free rate as I believe the shorter duration rate would be more reflective of the actual risk-free rate as it has less risk (due to the shorter duration) and less liquidity premium. \
+The summary statistics for the bonds and stocks excess returns data for the sample period of January 1926 - December 2019 is shown by the below: \
+```{r}
+as.data.frame(lapply(CRSP_univ[, .(Stock_Excess_Vw_Ret, Bond_Excess_Vw_Ret)], summary_stat))%>% tbl_disp
+```
+A sample dataset of the output is shown by the table below: \
+```{r}
+CRSP_univ[order(year,month)][c(1:5, (.N-5):.N ),] %>% tbl_disp
+```
+
+
+\newpage
+### Question 3. Portfolio Returns
+
+```{r}
+#3.
+PS2_Q3 <- function(CRSP_univ, begin_date = "1930-01-01", end_date = "2010-06-30"){
+  CRSP_data = copy(CRSP_univ)
+  
+  #create rolling past 36 months volatility (up to t -1)
+  CRSP_data[, `:=`(stock_vol = frollapply(Stock_Excess_Vw_Ret, 37, function(x) sd(x[1:36])),
+                 bond_vol = frollapply(Bond_Excess_Vw_Ret, 37, function(x) sd(x[1:36])))]
+  #create value weighted excess returns, 60/40 and inverse vols
+  CRSP_data[, `:=`(Excess_Vw_Ret = Stock_lag_MV/(Stock_lag_MV + Bond_lag_MV) * Stock_Excess_Vw_Ret +
+                     Bond_lag_MV/(Stock_lag_MV + Bond_lag_MV) * Bond_Excess_Vw_Ret,
+                   Excess_60_40_Ret = 0.6 * Stock_Excess_Vw_Ret + 0.4 * Bond_Excess_Vw_Ret,
+                   Stock_inverse_sigma_hat = 1/stock_vol,
+                   Bond_inverse_sigma_hat = 1/bond_vol)]
+  
+  CRSP_cut = CRSP_data[data.table::between(make_date(year,month,1), begin_date, end_date)]
+  
+  
+  #determine the constant levered k to match the volatility of the value-weighted returns of the targeted sample period
+  Levered_k = sd(CRSP_cut[, Excess_Vw_Ret])/ 
+                            sd(CRSP_cut[, Stock_inverse_sigma_hat * Stock_Excess_Vw_Ret + 
+                                            Bond_inverse_sigma_hat * Bond_Excess_Vw_Ret], na.rm = T)
+  #create unlevered and levered k variables
+  CRSP_cut[, `:=`(Unlevered_k = 1/(Stock_inverse_sigma_hat + Bond_inverse_sigma_hat),
+                   Levered_k = Levered_k)]
+  
+  #create excess return variables
+  CRSP_cut[, `:=`(Excess_Unlevered_RP_ret = (Stock_inverse_sigma_hat * Stock_Excess_Vw_Ret + 
+                                            Bond_inverse_sigma_hat * Bond_Excess_Vw_Ret) * Unlevered_k,
+                  Excess_Levered_RP_ret = (Stock_inverse_sigma_hat * Stock_Excess_Vw_Ret + 
+                                            Bond_inverse_sigma_hat * Bond_Excess_Vw_Ret) * Levered_k)]
+  #keep important columns
+  CRSP_cut[,.(year,
+               month,
+               Stock_Excess_Vw_Ret,
+               Bond_Excess_Vw_Ret,
+               Excess_Vw_Ret,
+               Excess_60_40_Ret,
+               Stock_inverse_sigma_hat,
+               Bond_inverse_sigma_hat,
+               Unlevered_k,
+               Excess_Unlevered_RP_ret,
+               Levered_k,
+               Excess_Levered_RP_ret)]
+  
+  return(CRSP_cut)
+}
+
+#from 1930.01 - 2010.06
+Port_Rets <- PS2_Q3(CRSP_univ)
+
+```
+When calculating the stock volatility and bond volatility weights, I have calculated their respective estimated volatilities using their past 3-years returns data up to month t-1. The value weighted excess returns are calculated based on their lagged market value of the stocks and bonds to prevent a forward bias. The 60/40 weighted portfolio is an investment of 60% in stocks and 40% in bonds that is rebalanced monthly. The unlevered RP portfolio is weighted based on their volatilities i.e. $w_{t,i} = k_t \hat\sigma^{-1}_{t,i}$ where $k_t$ is the unlevered k constant calculated as follows $k_t = \frac{1}{\Sigma_i \hat\sigma^{-1}_{t,i}}$ which makes sure that the weights in stocks and bonds sum to 1. The levered RP portfolio weights are calculated similarly with the exception of keeping the levered constant k constant over-time i.e. $k_t = k$ for all periods. The $k$ is set such that the annualized volatility of the levered RP strategy matches the ex-post realized volatility of the value-weighted portfolio for the sample period being considered.
+
+\newpage
+### Question 4. Portfolio Strategy Replication
+
+```{r}
+#4.
+PS2_Q4 <- function(pf_returns){
+  summary_stat <- function(ret, na.rm = F){
+      results = c("Annualized Mean" = mean(ret, na.rm = na.rm)* 12,
+                  "t-stat Annualized Mean" = (mean(ret, na.rm = na.rm)) /( (sd(ret, na.rm = na.rm) / sqrt( sum(!is.na(ret)) ) ) ),
+                "Annualized Volatility" = sd(ret, na.rm = na.rm) * sqrt(12),
+                "Annualized Sharpe" = mean(ret, na.rm = na.rm)*12 / (sd(ret, na.rm = na.rm) * sqrt(12)),
+                "Skewness" = skewness(ret, na.rm = na.rm),
+                "Excess Kurtosis" = kurtosis(ret, na.rm = na.rm) - 3)
+     return(results) 
+    }
+  
+  results <- as.data.frame(lapply(pf_returns[,.(Stock_Excess_Vw_Ret, Bond_Excess_Vw_Ret,
+                             Excess_Vw_Ret, Excess_60_40_Ret, Excess_Unlevered_RP_ret,
+                             Excess_Levered_RP_ret)], summary_stat))
+  
+  #reformat
+  results <- t(results)
+  results <- as.data.table(results)
+  results[, `:=`(`Annualized Mean` = scales::percent(`Annualized Mean`, accuracy = 0.01),
+                 `Annualized Volatility` = scales::percent(`Annualized Volatility`, accuracy = 0.01))]
+  results <- as.data.frame(results)
+  rownames(results) <- c("CRSP Stocks", "CRSP Bonds", "Value-Weighted Portfolio",
+                         "60/40 Portfolio", "Unlevered-RP", "Levered-RP")
+  return(results)
+}
+
+summary_res <- PS2_Q4(Port_Rets)
+```
+The resulting portfolio strategies and their summary statistics can be found in the table below: \
+```{r}
+summary_res %>% tbl_disp(latex_opts = c("hold_position", "striped", "scale_down"))
+```
+The table presented above closely replicates Panel A of Table 2 in Asness, Frazzini and Pedersen (2012). However, there are certainly some differences between the results of the two tables. First off, the sample period being considered between the two tables are different. The table above considers the period January 1930 - June 2010, whereas in Asness, the sample period being considered is January 1926 - June 2010 which would inadvertently result in some differences in all the summary statistics. The different sampling period is because I do not have access to the CRSP data prior to 1926 and thus when calculating the estimated volatilities used for replicating the RP portfolios, I have no choice but to exclude the first 3 years of the dataset. Furthermore, it has not been specified in the paper which T-bill rate the excess returns are calculated as off and I have taken the 30-day US T-bill rate as the risk free rate. \
+The difference between the two tables is somewhat economically significant. As seen for the annualized return for CRSP Stocks the results shown by the table above is 7% while the paper shows a result of 6.57% this big difference will impact all the other portfolio returns as they all depend on the CRSP stock returns. Hence, the annualized returns for all the strategies are showing better returns in the table above than the actual strategy in the paper. THe annualized volatility do not differ as much but they still impact the results quite significantly and affects the resulting sharpe ratios as well. Again, the difference between the two results can be attributed to the different sampling period used in these two tables. \
+
+
+

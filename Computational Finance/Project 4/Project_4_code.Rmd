@@ -1,0 +1,477 @@
+---
+title: "CF_Project_4"
+output: pdf_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = F, fig.align = "center", warning = F, fig.width = 6, fig.height = 4)
+require(ggplot2)
+require(data.table)
+```
+
+```{r}
+#prep data for Question 2
+#data from yahoo finance
+setwd("C:/Users/nhian/Documents/UCLA MFE/Spring 2020/Computational Methods in Finance/Projects/R/Project 4")
+df <- as.data.table(read.csv("C:/Users/nhian/Documents/UCLA MFE/Spring 2020/Computational Methods in Finance/Projects/R/Project 4/AMZN.csv", stringsAsFactors = F))
+df$Date <- as.Date(df$Date)
+df[order(Date),ret := Adj.Close/shift(Adj.Close) - 1]
+```
+
+### Question 1.
+
+```{r}
+tree <- function(s, k, payoff_FUN, r, t, p, u, d, n, type = 'e'){
+
+  # s = stock price
+  # k = strike price
+  # payoff_FUN = payoff function pass thru
+  # r = interest rate
+  # t = expiration
+  # p = probability of up
+  # u = up factor
+  # d = down factor
+  # n = # of periods
+  # type = option type "a" or "e" american/european respectively
+  
+  h = t/n
+  
+  #create pricing function
+  prc <- function(r, pu, pd, p, h = h){
+    prc = exp(-r*h) *(pu *p  + pd * (1-p))
+    
+    return(c(prc))
+  }
+  
+  n = n + 1
+  ones = matrix(rep(1, n*n), ncol = n)
+  
+  #create up matrix
+  up = ones
+  up[lower.tri(ones, T)] = 0
+  up = t(apply(up, 1, cumsum))
+  
+  #down matrix
+  down = diag(c(0,seq(1,n-1)))
+  down = t(apply(down, 1, cumsum))
+  
+  #stock path matrix
+  mat = s * u^up * d^down
+  mat[lower.tri(mat, F)] = 0
+  
+  #placeholders matrix
+  pl_mat = matrix(rep(0,n*n),ncol =n) #payoff matrix Cu, Cd, etc..
+  
+  #set last path of payoff matrix as the payoff of the last stock paths
+  pl_mat[,n] = mat[,n]
+  pl_mat[,n] = payoff_FUN(pl_mat[,n],k)
+  
+  #loop through the last columns
+  for(j in (dim(mat)[2]-1):1){ #from last column - 1 : 1
+    
+    #loop through the rows (1 to j); no. rows decreasing every period by 1 (recombining tree)
+    for(i in 1 : j){
+      #for each row calculate the price, delta and bond using the prc function
+      #pu is the up payoff defined as the next column and the same row
+      #pd is the down payoff defined as the next column and the next row
+      #mat[i,j] is the current stock price
+      
+      val = prc(r, pu = pl_mat[i,j+1], pd = pl_mat[i+1,j+1], p = p, h)
+      
+      if(tolower(type) == 'a'){ #american option
+        
+        #max of exercise that date or value
+        pl_mat[i,j] = max(payoff_FUN(mat[i,j], k) , val) 
+        
+      } else if(tolower(type) == 'e'){#european option
+        #simply the intrinsic value
+        pl_mat[i,j] = val
+      } else{
+        stop('choose correct option type')
+      }
+      
+      
+      
+    }
+  }
+  
+  return(pl_mat[1,1])
+}
+
+
+call_payoff <- function(s,k){
+  pmax((s-k),0)
+}
+
+put_payoff <- function(s, k){
+  pmax((k-s),0)
+}
+```
+
+```{r}
+#1.
+#a.
+binom_param_a <- function(r, sigma, t, n){
+  h = t/n
+  c = 0.5 * (exp(-r * h) + exp((r + sigma^2)*h))
+  d = c + sqrt(c^2 - 1)
+  u = 1/d
+  p = (exp(r * h) - d)/(u-d)
+
+  return(c(p, u, d))
+}
+
+
+#b.
+binom_param_b <- function(r, sigma, t, n){
+  h = t/n
+  u = exp(r * h) * (1 + sqrt(exp(sigma^2 * h) -1 ))
+  d = exp(r * h) * (1 - sqrt(exp(sigma^2 * h) -1 ))
+  p = 0.5
+  return(c(p, u, d))
+}
+
+
+#c.
+binom_param_c <- function(r, sigma, t, n){
+  h = t/n
+  u = exp( ((r - 0.5 * sigma^2))*h + sigma * sqrt(h) )
+  d = exp( ((r - 0.5 * sigma^2))*h - sigma * sqrt(h) )
+  p = 0.5
+  return(c(p, u, d))
+}
+
+
+
+#d.
+binom_param_d <- function(r, sigma, t, n){
+  h = t/n
+  u = exp(sigma * sqrt(h))
+  d = exp(-sigma * sqrt(h))
+  p = 0.5 + 0.5 * ((r - 0.5 * sigma^2) * sqrt(h))/sigma
+  return(c(p, u, d))
+}
+
+
+eval_tree <- function(s, k, r, t, sigma, n, payoff_FUN = call_payoff, param_fun = binom_param_d, type = 'e'){
+  params <- param_fun(r, sigma, t, n)
+  res <- tree(s = s, k = k, payoff_FUN, r = r, t = t, p = params[1], u = params[2], d = params[3], n = n, type = type)
+  return(res)
+}
+
+s0 = 32
+k = 30
+r = 0.05
+t = 0.5
+sigma = 0.24
+
+n = c(10, 20, 40, 80, 100,200,500)
+res_1 <- sapply(n, eval_tree, s = s0, k = k, r = r, t = t, sigma = sigma, param_fun = binom_param_a)
+res_2 <- sapply(n, eval_tree, s = s0, k = k, r = r, t = t, sigma = sigma, param_fun = binom_param_b)
+res_3 <- sapply(n, eval_tree, s = s0, k = k, r = r, t = t, sigma = sigma, param_fun = binom_param_c)
+res_4 <- sapply(n, eval_tree, s = s0, k = k, r = r, t = t, sigma = sigma, param_fun = binom_param_d)
+
+res_mat = data.frame(cbind(n, res_1, res_2, res_3,res_4))
+```
+
+Using the different methods, the convergence rates of the different methods are shown in the plot below: \
+```{r}
+ggplot(aes(x = n), data = res_mat) +
+  geom_line(aes(y = res_1, color = "Method 1")) +
+  geom_line(aes(y = res_2, color = "Method 2")) +
+  geom_line(aes(y = res_3, color = "Method 3")) +
+  geom_line(aes(y = res_4, color = "Method 4")) +
+  scale_color_manual(name = "Method", values = c("Method 1" = "black",
+                                                 "Method 2" = "blue",
+                                                 "Method 3" = "red",
+                                                 "Method 4" = "green")) +
+  xlab("n") + ylab("Price") + ggtitle("Convergence Rate Binomial Model") + theme_bw()
+```
+I will be using Method 4 and n = 500, in the next sections below whenever the binomial method is called to evaluate the option price. \
+
+
+## Question 2. AMZN Price
+```{r}
+#monthly vol
+amz_vol <- sd(df$ret, na.rm = T)
+#annualized
+amz_vol <- amz_vol * sqrt(12)
+
+#prc = 2314.08 #current stock price
+act_prc = 344.5 #actual option price
+k = 2540
+t = as.numeric((as.Date("2021-01-21") - as.Date("2020-04-28"))/365)
+r = 0.02
+
+
+vol_root <- function(s, k, t, r, prc, ...){
+  root_fun <- function(sigma) {
+    prc - eval_tree(s = s, k = k, t = t, r = r, sigma = sigma, n = 500, ...)
+  }
+  
+  uniroot(root_fun, c(0.001,1), check.conv = T)
+}
+
+
+
+amzn_binom_prc <- eval_tree(s = 2314.08, k = k, t = t, r = r, sigma = amz_vol, n = 500)
+```
+(a.) The current stock closing price for AMZN (04/28/2020) is 2314.08, with k = 2540, annualized volatility of 28.78%, $r = 2\%$, and t = 0.7342. The call price is: \
+```{r}
+amzn_binom_prc
+```
+(b.) The actual call price is 344.5, using this number the implied volatility is: \
+```{r}
+amzn_impl_vol = vol_root(s = 2314.08, k = k, t = t, r = r, prc = act_prc)$root
+amzn_impl_vol
+```
+
+## Question 3.
+```{r}
+s0 = 49
+k = 50
+r = 0.03
+t = 0.3846
+sigma = 0.2
+
+
+#greeks
+est_greeks <- function(s0, k, r, t, sigma, eval_FUN, ...){
+  #delta
+  delta = (eval_tree(s = s0+0.01, k = k, r = r, t = t, sigma = sigma, ...) - eval_tree(s = s0-0.01, k = k, r = r, t = t, sigma = sigma, ...))/(2*0.01)
+  
+  #gamma
+  gamma = (eval_tree(s = s0 + (2*0.01), k = k, r = r, t = t, sigma = sigma, ...) - 2*eval_tree(s = s0, k = k, r = r, t = t, sigma = sigma, ...) + eval_tree(s = s0 - (2 * 0.01), k = k, r = r, t = t, sigma = sigma, ...) )/(4 * 0.01^2)
+  
+
+  #theta
+  theta = (eval_tree(s = s0, k = k, r = r, t = t - 0.004, sigma = sigma, ...) - eval_tree(s = s0, k = k, r = r, t = t + 0.004, sigma = sigma, ...))/(2 * 0.004)
+  
+  #vega
+  vega = (eval_tree(s = s0, k = k, r = r, t = t, sigma = sigma + 0.001, ...) - eval_tree(s = s0, k = k, r = r, t = t, sigma = sigma - 0.001, ...))/(2*0.001)
+  
+  #rho
+  rho = (eval_tree(s = s0, k = k, r = r  + 0.001, t = t, sigma = sigma, ...) - eval_tree(s = s0, k = k, r = r - 0.001, t = t, sigma = sigma, ...))/(2*0.001)
+  
+  
+  return(c("delta" = delta,
+           "gamma" = gamma,
+           "theta" = theta,
+           "vega" = vega,
+           "rho" = rho))
+}
+
+
+list_s <- seq(20, 80, 2)
+greeks_s <- sapply(list_s, est_greeks, k = k, r = r, t = t, sigma = sigma, eval_FUN = eval_tree, n = 500)
+greeks_s <- data.frame(cbind(list_s, t(greeks_s)))
+```
+Using the parameters given, the greeks of the call option as we vary the spot price is shown by the plot below: \
+```{r}
+#plot
+ggplot(aes(x = list_s), data = greeks_s) +
+  geom_line(aes(y = delta, color = "Delta")) +
+  geom_line(aes(y = gamma, color = "Gamma")) +
+  geom_line(aes(y = theta, color = "Theta")) +
+  geom_line(aes(y = vega, color = "Vega")) +
+  geom_line(aes(y = rho, color = "Rho")) +
+  scale_color_manual(name = "Greeks", values = c("Delta" = "black",
+                                                 "Gamma" = "blue",
+                                                 "Theta" = "red",
+                                                 "Vega" = "green",
+                                                 "Rho" = "brown")) +
+  xlab("Stock Price") + ylab("Value") + ggtitle("Greeks v. Stock Price") + theme_bw()
+```
+The Delta of the call option as time to expiration changes is shown below: \
+```{r}
+#delta varying time to expiration
+list_t <- seq(0.01, 0.3846, 0.01)
+
+
+est_delta <- function(s0, k, r, t, sigma, eval_FUN, ...){
+    delta = (eval_tree(s = s0+0.01, k = k, r = r, t = t, sigma = sigma, ...) - eval_tree(s = s0-0.01, k = k, r = r, t = t, sigma = sigma, ...))/(2*0.01)
+  return(delta)
+}
+
+greeks_t <- sapply(list_t, est_delta, s0 = s0, k = k, r = r, sigma = sigma, eval_FUN = eval_tree, n = 500)
+greeks_t <- data.frame(cbind(list_t, greeks_t))
+
+ggplot(aes(x = list_t), data = greeks_t ) +
+  geom_line(aes(y = greeks_t), color = "black") +
+  xlab("Time to Expiration") + ylab("Value") + ggtitle("Delta v. Time to Expiration") + theme_bw()
+```
+
+
+## Question 4.
+The plot of the American and European put for different stock prices is shown below: \
+```{r}
+k = 100
+r = 0.05
+sigma = 0.3
+t = 1
+
+list_s <- seq(80, 120, 4)
+eu_prc <- sapply(list_s, eval_tree, k = k, r = r, t = t, sigma = sigma, param_fun = binom_param_d, n = 500, payoff_FUN = put_payoff)
+am_prc <- sapply(list_s, eval_tree, k = k, r = r, t = t, sigma = sigma, param_fun = binom_param_d, n = 500, payoff_FUN = put_payoff, type = 'a')
+
+res_q4 <- data.frame(cbind(list_s, eu_prc, am_prc))
+
+ggplot(aes(x = list_s), data = res_q4) +
+  geom_line(aes(y = eu_prc, color = "European")) +
+  geom_line(aes(y = am_prc, color = "American")) +
+  scale_color_manual(name = "Option Type", values = c("European" = "black",
+                                                 "American" = "blue")) +
+  xlab("Stock Price") + ylab("Option Price") + ggtitle("American v. European Put") + theme_bw()
+```
+The value of the American put is always slightly above the value of the European put.
+
+## Question 5.
+```{r}
+#a.
+trinomial_a <- function(s0, k, r, t, sigma, n = 100){
+
+    h = t/n
+    
+    u = exp(sigma*sqrt(3*h))
+    d = 1/u
+    
+    pu = (r * h * (1 - d) + (r * h)^2 + (sigma^2 * h))/((u-d)*(u-1))
+    pd = (r * h * (1 - u) + (r * h)^2 + (sigma^2 * h))/((u-d)*(1-d))
+    pm = 1 - pu - pd
+
+    s_mat = payoff_mat =  matrix(ncol=2*n+1,nrow=n+1)
+    s_mat[1, n+1] = s0
+    
+    for(i in 1:n){
+        s_mat[i+1, (n+1-i):(n+1+i)] <- s0 * (u^(-i:i))
+    }
+
+    #set eu call payoff
+    payoff_mat[n+1,] = pmax(s_mat[n+1,]-k,0)
+    
+    #calculate price (stepping backwards)
+    for(i in n:1){
+        payoff_mat[i, (n-i+2):(i+n)] = exp(-r*h) * (pu * payoff_mat[i+1,(n-i+3):(i+n+1)] +
+                                                    pm * payoff_mat[i+1,(n-i+2):(i+n)] +
+                                                    pd * payoff_mat[i+1,(n-i+1):(i+n-1)] )
+    }
+
+    return(payoff_mat[1, n+1])
+
+}
+
+
+#b.
+trinomial_b <- function(s0, k, r, t, sigma, n = 100){
+
+    h = t/n
+    
+    u = sigma*sqrt(3*h)
+    d = -u
+    
+    pu = 0.5 * ( ( (sigma^2 * h) + ((r - 0.5 * sigma^2)^2) * h^2 )/ u^2 + (r - 0.5 * sigma^2) * h/u)
+    pd = 0.5 * ( ( (sigma^2 * h) + ((r - 0.5 * sigma^2)^2) * h^2 )/ u^2 - (r - 0.5 * sigma^2) * h/u)
+    pm = 1 - pu - pd
+
+    s_mat = payoff_mat =  matrix(ncol=2*n+1,nrow=n+1)
+    s_mat[1, n+1] = log(s0)
+    
+    for(i in 1:n){
+        s_mat[i+1, (n+1-i):(n+1+i)] <- log(s0) + (u*(-i:i))
+    }
+
+    #set EU call payoff
+    payoff_mat[n+1,] = pmax(exp(s_mat[n+1,]) - k,0)
+    
+    #calculate price (stepping backwards)
+    for(i in n:1){
+        payoff_mat[i, (n-i+2):(i+n)] = exp(-r*h) * (pu * payoff_mat[i+1,(n-i+3):(i+n+1)] +
+                                                    pm * payoff_mat[i+1,(n-i+2):(i+n)] +
+                                                    pd * payoff_mat[i+1,(n-i+1):(i+n-1)] )
+    }
+
+    return(payoff_mat[1, n+1])
+
+}
+
+s0 = 32
+k = 30
+r = 0.05
+t = 0.5
+sigma = 0.24
+n_list = c(10, 15, 20, 40, 70, 80, 100, 200, 500)
+res_tri_a <- sapply(n_list, trinomial_a, s0 = s0, k = k, r = r, t = t, sigma = sigma)
+res_tri_b <- sapply(n_list, trinomial_b, s0 = s0, k = k, r = r, t = t, sigma = sigma)
+res_tri = data.frame(cbind(n_list, res_tri_a, res_tri_b))
+```
+The convergence rate of the two different trinomial methods can be seen in the plot below: \
+```{r}
+
+ggplot(aes(x = n_list), data = res_tri) +
+  geom_line(aes(y = res_tri_a, color = "Method a")) +
+  geom_line(aes(y = res_tri_b, color = "Method b")) +
+  scale_color_manual(name = "Method", values = c("Method a" = "black",
+                                                 "Method b" = "blue")) +
+  xlab("n") + ylab("Option Price") + ggtitle("Trinomial Convergence") + theme_bw()
+
+```
+
+
+## Question 6.
+```{r}
+halton_seq = function(n, base) {
+  res_vec = numeric(n)
+  
+  for(index in 1:n){
+    fraction = 1
+    result = 0
+    ct = index
+    while (index > 0) {
+      fraction = fraction / base
+      result = result + fraction * (index %% base)
+      index = floor(index / base)
+    }
+    res_vec[ct] = result
+  }
+  return(res_vec)
+}
+
+##Box-Mueller Halton
+box_mueller <- function(n, base1, base2){
+  out = n
+  #if not even add 1 more since need 2 for each couple of normals
+  n = ifelse(n %%2 == 0, n, n+1) 
+  #generate 2n
+  h1 <- halton_seq(n/2, base1)
+  h2 <- halton_seq(n/2, base2)
+  
+  #create couples of normals for each couple of uniform
+  z1 = sqrt(-2 * log(h1)) * cos(2 * pi *  h2 )
+  z2 = sqrt(-2 * log(h1)) * sin(2 * pi *  h2 )
+  #return only n number of normals
+  return( c(z1,z2)[1:out])
+}
+
+call_prc_halton <- function(s, k, t, r, sigma, n, base1, base2){
+  rand_norm <- box_mueller(n, base1, base2)
+  
+  sim_s <- s * exp( (r - 0.5 * sigma^2) * t + sigma * sqrt(t) * rand_norm )
+  payoff <- pmax(sim_s - k, 0)
+  prc = exp(-r * t) * mean(payoff)
+  return(prc)
+}
+```
+
+Using the following parameters $S_0 = 32$, $K = 30$, $r = 0.05$, $t = 0.5$, $\sigma = 0.24$, the Call Option price found using the Halton's sequence with $N = 10,000$ and $b_1 = 3$ and $b_2 = 5$ is
+```{r}
+s0 = 32
+k = 30
+r = 0.05
+t = 0.5
+sigma = 0.24
+
+call_prc_halton(32,30, 0.5, 0.05, 0.24,10000,3,5)
+```
+

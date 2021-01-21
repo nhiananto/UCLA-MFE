@@ -1,0 +1,371 @@
+---
+title: "CF_HW2"
+output: pdf_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = F, warning = F, fig.align = "center", fig.height = 4, fig.width = 5)
+require(ggplot2)
+```
+
+### Niko Hiananto
+
+### Question 1. Bivariate Normal
+Using Cholesky decomposition of the covariance matrix $\Sigma = L L^T$ we can generate multi-variate normal random variates $X = LZ + \mu$ where $Z$ is normally distributed $N(0,1)$. The result for the correlation $\rho$ is shown below: \
+```{r}
+#1. Bivariate-Normal
+bivariate_normal <- function(a,  n = 1000){
+  mu = matrix(c(0,0), ncol = 1)
+  cov_mat = matrix(c(3,a,a,5), byrow = T, ncol = 2)
+  
+  #cholesky decomposition
+  norm = matrix(0, ncol = 2, nrow = n)
+  
+  for(i in 1:n){
+    norm[i,] <- t((t(chol(cov_mat)) %*% matrix(rnorm(2,0,1), ncol = 1) + mu))
+  }
+  return(cor(norm[,1],norm[,2]))
+}
+
+
+bivariate_normal(-0.7)
+```
+
+### Question 2. Evaluating Expected Values
+Similar to question (1) we can generate bivariate normal distribution X,Y with $\rho = 0.6$ using the lower root of the cholesky decomposition of the variance-covariance matrix. Then, to evaluate the expected value we can use monte-carlo by generating $f(x_i)\ ;\ i = 1,...,N$ and finally taking the mean of the generated $f(x_i)$ will convertge to $E[X]$ by the law of large numbers. Using $\rho = 0.6$ and monte-carlo simulation with 1,000 paths the expected value of the expression turns out to be: \
+```{r}
+#2. Evaluating expected values MC
+q2_function <- function(rho, n = 1000){
+  cov_mat = matrix(c(1,rho,rho,1), ncol = 2)
+  
+  
+  f_x <- function(x, y){
+    max(0, (x^3 + sin(y) + x^2 * y))
+  }
+  
+  res = numeric(n)
+  
+  for(i in 1:n){
+    input = t(chol(cov_mat)) %*% matrix(rnorm(2,0,1), ncol = 1)
+    res[i] = f_x(input[1,1], input[2,1])
+  }
+  
+  return(mean(res))
+}
+
+q2_function(0.6)
+
+```
+
+### Question 3. Expected Values using Simulation
+Using 10,000 paths for simulation, the expected value for $A(t) and B(t)$ for $t = 1,3,5$ is shown below
+```{r}
+#3. Expected Values
+q3_function <- function(t, paths = 10000){
+  a_t <- function(wt){
+    return(wt^2 + sin(wt))
+  }
+  
+  b_t <- function(wt){
+    return(exp(t/2) * cos(wt))
+  }
+  
+  wt = sqrt(t) * rnorm(paths,0,1)
+  
+  a = mean(a_t(wt))
+  b = mean(b_t(wt))
+  
+  return(c("A_t" = a, "B_t" = b))
+}
+
+
+res = sapply(c(1,3,5), function(t) q3_function(t))
+colnames(res) <- c(1, 3, 5)
+res
+```
+(b.) \ 
+The $E[B(t)]$ for $t = 1,3,5$ are close to each other which indicates that the value for $E[B(t)]$ does not change a lot as $t$ increases where as the value of $E[A(t)]$ changes quite a lot as $t$ increases.
+(c.)\
+I have tried 2 different variance reduction techniques to reduce the variance when calculating $E[B(t)]$. The first technique used is the anti-thetic variate technique where I will set $-Z_i$ as the anti-thetic variable. However, as $cos(Z_i) = cos(-Z_i)$ the anti-thetic variate technique does not work well. The result below shows the variance and mean for the function for 10,000 paths. \
+```{r}
+#c. variance reduction
+var_reduction_bt <- function(t, paths = 10000){
+  n = paths/2
+  b_t <- function(wt){
+    return(exp(t/2) * cos(wt))
+  }
+  
+  wt = sqrt(t) * rnorm(n,0,1)
+  wt_2 = -wt
+  
+  x = (b_t(wt) + b_t(wt_2))/2
+  
+  b = mean(x)
+  
+  return(c("Mean" = mean(x), "Variance" = var(x)))
+}
+
+var_reduction_bt(5)
+```
+As seen from the result above, the variance using the anti-thetic variate technique is still huge. The next technique I have considered is to use a control variate. I defined another random variable $Y$ with a distribution that we can calculate the expected value. I have defined $Y$ to be $Y = cos(W_t)$ and it can be shown that $E[cos(W_t)] = e^{-t/2}$. It can clearly be seen that $X$ and $Y$ are correlated and jence, using the control variate technique I can define $T = X - \gamma(Y - \delta)$ where $X = e^{t/2}cos(W_t)$, $Y$ as before, $\gamma = 1$ and $\delta = e^{-t/2}$. Then, $E[T] = E[X] - \gamma(E[Y] - \delta) = \theta$. The results of using the control-variate technique with the parameters and variables as stated above is shown below: \
+```{r}
+var_reduction_bt_2 <- function(t, paths = 10000){
+  
+  b_t <- function(wt){
+    return(exp(t/2) * cos(wt))
+  }
+  
+  wt = sqrt(t) * rnorm(paths,0,1)
+  
+  t = mean(b_t(wt)) - (mean(cos(wt)) - exp(-t/2))
+  var_t = var(b_t(wt) - (cos(wt) - exp(-t/2)))
+  
+  return(c("Mean" = t, "Variance" = var_t))
+}
+
+var_reduction_bt_2(5)
+```
+We can see that the variance have reduced significantly with the same number of paths.
+
+
+### Question 4. Monte Carlo Option Pricing
+Using 10,000 paths, the value of the option price with the given parameters is shown below: \
+```{r}
+## 4. MC option pricing
+s0 = 88
+sigma = 0.2
+r = 0.04
+t = 5
+X = 100
+
+c_price_mc <- function(r, sigma, s0, paths = 10000){
+  s_t = s0 * exp(sigma * rnorm(paths) * sqrt(t) + (r - (sigma^2)/2) * t)
+  payoff = pmax(s_t - X, 0)
+  prc = exp(-r * t) * mean(payoff)
+  return(prc)
+}
+
+
+sim_prc = c_price_mc(r, sigma, s0)
+sim_prc
+```
+(b.) Using the Black-Scholes closed form solution the actual value of the call option price is shown below: \
+```{r}
+#b. BS  Closed Form
+bs_formula <- function(s, k, t, delta, sigma, r){
+  d1 = 1/(sigma * sqrt(t)) * (log(s/k) + ((r + (sigma^2) / 2 )* t))
+  d2 = d1 - (sigma * sqrt(t))
+  c = s * exp(-delta * t) * pnorm(d1) - k * pnorm(d2) * exp(- r * t)
+  return(c("prc"=c))
+}
+
+bs_prc = bs_formula(s0, X, t, 0, sigma, r)
+unname(bs_prc)
+```
+and the absolute difference between the prices is: \
+```{r}
+abs(sim_prc - unname(bs_prc))
+```
+(c.) I have used the Anti-thetic variates when simulating the stock price by using $-Z_i$ as the anti-thetic variable. The resulting price with the same 10,000 paths is given by: \
+```{r}
+#c. variance reduction
+#Anti-thetic variates
+
+c_price_mc_var <- function(r, sigma, s0, paths = 10000){
+  rand_norm = rnorm(ceiling(paths/2))
+  
+  s_t_p = s0 * exp(sigma * rand_norm * sqrt(t) + (r - (sigma^2)/2) * t)
+  s_t_m = s0 * exp(sigma * -rand_norm * sqrt(t) + (r - (sigma^2)/2) * t) #anti-thetic variate
+  
+  payoff_p = pmax(s_t_p - X, 0)
+  payoff_m = pmax(s_t_m - X, 0)
+  payoff = (payoff_p + payoff_m)/2
+  
+  prc = exp(-r * t) * mean(payoff)
+  return(prc)
+}
+
+sim_prc_var <- c_price_mc_var(r, sigma, s0)
+sim_prc_var
+```
+and the absolute difference between the actual price is now: \
+```{r}
+abs(sim_prc_var - unname(bs_prc))
+```
+which is considerably much better than the price given by the Monte Carlo simulation in part (a) without any variance reduction techniques.
+
+
+### Question 5. Monte Carlo Stock Price Simulation
+(a.) The plot of all $E[S_n]$ from $n = 1,..,10$ evaluated using 1,000 paths is shown below: \
+```{r}
+#5. 
+s0 = 88
+sigma = 0.18
+r = 0.04
+t = 5
+X = 100
+
+sn <-function(sigma, t, paths = 1000){
+  s_t = s0 * exp(sigma * rnorm(paths) * sqrt(t) + (r - (sigma^2)/2) * t)
+  exp_sn = mean(s_t)
+  return(exp_sn)
+}
+
+
+#a.
+res_a = sapply(1:10, function(t) sn(0.18, t))
+qplot(1:10, res_a, main = "Expected Sn n = 1-10", xlab = "n", ylab = "Stock Price") + theme_bw()
+```
+
+(b.) The simulated 6 paths of $S_t$ by dividing the interval into 1,000 equal parts is shown below: \
+```{r}
+#b. dividing by parts
+sn_part <-function(sigma){
+  
+  paths = 6
+  
+  
+  n = 1000
+  sim = matrix(0, ncol = n+1, nrow = paths)
+  sim[,1] = s0
+  h = 1/100
+  for(i in 2:dim(sim)[2]){
+    sim[, i] = sim[,i-1] * exp((r - 0.5 * sigma^2)*h  + rnorm(dim(sim)[1],0, sigma) * sqrt(h))
+  }
+  
+  
+  
+  return(t(sim))
+}
+res_b <- sn_part(sigma)
+
+#plot
+ggplot() +
+  geom_line(aes(x = 0:1000, y = res_b[,1])) +
+  geom_line(aes(x = 0:1000, y = res_b[,2])) +
+  geom_line(aes(x = 0:1000, y = res_b[,3])) +
+  geom_line(aes(x = 0:1000, y = res_b[,4])) +
+  geom_line(aes(x = 0:1000, y = res_b[,5])) +
+  geom_line(aes(x = 0:1000, y = res_b[,6])) +
+  xlab("Steps") + ylab("Stock Price") + ggtitle("Simulated 6 Paths") + theme_bw()
+```
+
+(c.) The combined plot from (a.) and (b.) can be seen below: \
+```{r}
+#c. plot
+ggplot() +
+  geom_line(aes(x = 0:1000, y = res_b[,1])) +
+  geom_line(aes(x = 0:1000, y = res_b[,2])) +
+  geom_line(aes(x = 0:1000, y = res_b[,3])) +
+  geom_line(aes(x = 0:1000, y = res_b[,4])) +
+  geom_line(aes(x = 0:1000, y = res_b[,5])) +
+  geom_line(aes(x = 0:1000, y = res_b[,6])) +
+  geom_point(aes(x = (1:10)*100, y = res_a), color = "blue") +
+  xlab("Steps") + ylab("Stock Price") + ggtitle("Simulated 6 Paths and Expected Value of Sn") + theme_bw()
+```
+
+(d.) If $\sigma$ is changed to 35% the plots would be: \
+```{r}
+#a.
+res_d = sapply(1:10, function(t) sn(0.35, t))
+qplot(1:10, res_d, main = "Expected Sn n = 1-10, vol = 35%", xlab = "n", ylab = "Stock Price", color = "0.35") + 
+  geom_point(aes(1:10, res_a, color = "0.18")) + theme_bw() + 
+  scale_color_manual(name = "volatility", values = c("0.18" = "blue", "0.35"="black"))
+
+```
+
+```{r}
+res_d_b <- sn_part(0.35)
+#plot
+ggplot() +
+  geom_line(aes(x = 0:1000, y = res_d_b[,1])) +
+  geom_line(aes(x = 0:1000, y = res_d_b[,2])) +
+  geom_line(aes(x = 0:1000, y = res_d_b[,3])) +
+  geom_line(aes(x = 0:1000, y = res_d_b[,4])) +
+  geom_line(aes(x = 0:1000, y = res_d_b[,5])) +
+  geom_line(aes(x = 0:1000, y = res_d_b[,6])) +
+  xlab("Steps") + ylab("Stock Price") + ggtitle("Simulated 6 Paths, vol = 35%") + theme_bw()
+```
+We can see from the two figures above that the 6 paths generated using the higher volatility varies a lot more now compared to the one generated with the old value of volatility, whereas the expected values of the stock price at each point generated with the new volatility do not vary as much compared to the old plot with the old value of volatility.
+
+
+### Question 6. Integral Evaluation
+(a.) Using the Euler's discretization scheme we can evaluate the integral: $y_{i+1} = y_i + f(x_i,y_i) h$ with initial values $x_0 = 0$ and $y_0 = 0$ and $f(x) = 4\sqrt{1 - x^2}$.Using a step size of $h = \frac{1}{10000}$ the approximate value of the integral is given by:
+```{r}
+#6.
+#a. Euler discretization
+euler <- function(n){
+  #step size
+  h = 1/n 
+  
+  #define function
+  f_x <- function(x){
+    return(4 * sqrt(1 - x^2))
+  }
+  
+  #euler discretization
+  y = numeric(n+1)
+  y[1] = 0
+  ct = 1
+  for(i in seq(0,1,h)){
+    y[ct+1] = y[ct] + f_x(i) * h
+    ct = ct + 1
+  }
+  
+  #calculate result
+  res = tail(y,1)
+  return(res)
+}
+
+euler(10000)
+```
+
+(b.) It can be seen that $\int_0^1 \sqrt{1 - x^2} dx = E[f(U)]$, where $f(x) =  \sqrt{1 - x^2}$ and $U \sim U[0,1]$, hence we can use Monte Carlo simulation to evaluate the integral. Using 10,000 paths, the value of the integral approximated by the Monte Carlo simulation turns out to be \
+```{r}
+#b. MC Simulation
+mc_integral <- function(n){
+  #function to estimate
+  f_x <- function(x){
+    return(sqrt(1 - x^2))
+  }
+  
+  #return 4 * E[f(U)]
+  return(4 * mean(f_x(runif(n))))
+  
+}
+mc_integral(10000)
+```
+
+(c.) Using importance sampling we will define $t(x) = \frac{1 - ax^2}{1 - \frac{a}{3}}$ for $0 \leq x \leq 1$ and $t(x) = 0$ elsewhere. Then, the integral can be estimated as $\theta = E_t[\frac{g(Y)f(Y)}{t(Y)}]$ where $Y$ comes from the $t(.)$ distribution. The approximate value of the integral using the importance sampling and 10,000 paths is
+```{r}
+#c. Importance Sampling
+importance_sampling <- function(n){
+  #function to estimate
+  f_x <- function(x){
+    return(4 *sqrt(1 - x^2))
+  }
+  
+  t_x <- function(x, a = 0.74){
+    (1 - (a * x^2))/(1-(a/3))
+  }
+  
+  
+  xi = runif(n)
+  #generate t(.) with acceptance-rejection method
+  y = t_x(xi)/ (-3/(0.74 - 3)) #max of t(x) in its domain
+  
+  u = runif(n)
+  
+  u = u[u<=y]
+  
+  mean( (f_x(u)/t_x(u)), na.rm = T)
+  
+}
+
+importance_sampling(10000)
+```
+
+
+

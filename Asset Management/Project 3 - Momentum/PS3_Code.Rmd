@@ -1,0 +1,339 @@
+---
+title: "Momentum_PS3"
+output: pdf_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = F, fig.align = "center", fig.height = 4, fig.width = 6, warning = F)
+require(data.table)
+require(lubridate)
+require(moments)
+require(zoo)
+require(kableExtra)
+require(ggplot2)
+```
+
+
+```{r}
+setwd("~/UCLA MFE/Spring 2020/Quantitative Asset Management/Project 3")
+CRSP_Stocks <- as.data.table(read.csv("crsp_stocks.csv", stringsAsFactors = F))
+CRSP_Stocks$date <- as.Date(as.character(CRSP_Stocks$date), format = "%Y%m%d")
+```
+
+
+```{r}
+#table display
+tbl_disp <- function(tbl, col.names = colnames(tbl), digits = 5, latex_opts = c("hold_position", "striped"),...){
+  tbl %>% kable(., col.names = col.names, digits = digits, align = c("c")) %>% 
+    kable_styling(latex_options = latex_opts, ...)
+}
+```
+
+
+
+```{r}
+PS3_Q1 <- function(CRSP_Stocks){
+
+  df = copy(CRSP_Stocks)
+  
+  df = df[SHRCD %in% c(10,11) & EXCHCD %in% c(1,2,3)]
+  
+  df$date <- as.Date(df$date)
+  
+  #filter out when return is not available
+  df[, `:=`(RET = ifelse(RET %in% c("E","D","C","B","A"), NA, as.numeric(RET)),
+              DLRET = ifelse(DLRET %in% c("S","T","A","P"), NA, as.numeric(DLRET)) 
+              )]
+  
+  
+  #add return columns
+  df[, RET := ifelse(is.na(RET),
+                          ifelse(is.na(DLRET), NA, DLRET),
+                          ifelse(is.na(DLRET), RET, (1+RET)*(1+DLRET) - 1))]
+  
+  
+  #market value (in millions)
+  df[, MV := abs(PRC) * SHROUT/1000]
+  
+  #create dummy table (cartesian of all PERMNO and dates)
+  dummy_dt <- CJ(unique(df[,date]), unique(df[,PERMNO]))
+  colnames(dummy_dt) <- c("date", "PERMNO")
+  
+  #rejoin with original df
+  df <- merge(df, dummy_dt, by = c("PERMNO", "date"), all = T) #keep all rows
+  
+  setorder(df, PERMNO, date)
+  
+  #lagged market data
+  df[order(date), lag_Mkt_Cap := shift(MV), by = PERMNO]
+  
+  #count number of records on the last 12 months date (minimum needs 8)
+  df[order(date), last_12 := frollapply(RET, 13, function(x) sum(!is.na(x[1:11])) ), by = PERMNO]
+  
+  #price at t-13 is not missing
+  #ret(t-2) is not missing
+  #me(t-1) is not missing
+  df = df[order(date), incl := !is.na(shift(PRC, 13)) &  !is.na(shift(RET, 2)) & !is.na(lag_Mkt_Cap), by = PERMNO]
+  
+  
+  #cumret
+  df[order(date), cumret := frollapply(RET, 13, function(x) sum(log(1 + x[1:11] ), na.rm = T) ), by = PERMNO]
+  
+  #rank
+  df = df[incl == T & fcoalesce(last_12, 0) >= 8]
+  df[, Ranking_Ret := frank(cumret), by = date]
+  df[, `:=`(Year = year(date),
+            Month = month(date))]
+  
+  
+  df[Year >= 1927 & Year <= 2019, .(Year, Month, PERMNO, EXCHCD, lag_Mkt_Cap, RET, Ranking_Ret)]  
+  
+}
+
+CRSP_Stocks_Momentum <- PS3_Q1(CRSP_Stocks)
+
+```
+### Question 1.
+To construct the ranking for each firm's returns several data cleaning processes steps have been done and is listed below: \
+1. Sample Period: The sample period considered for the replication strategy is for the period of 1927 - 2019. 
+1. Universe of Stocks: The sample has been restricted to only include common shares (SHRCD = 10 and 11) and will also be restricted to securities traded on the New York Stock Exchange, American Stock Exchange, and NASDAQ (EXCHCD = 1, 2, and 3) \
+2. Missing Returns: The data contains missing returns specifically for RET with the characters (E, D, C, B, A), are treated as they are missing and will be considered to have 0 return. The characters represent no listing information, no valid previous prices, etc. The universe of stocks that have missing returns are quite small and will be assumed to have negligible impact when replicating the value-weighted returns. \
+3. Delisting return calculation: Similarly, the delisting returns could also be missing and DLRET with the characters (S, T, A, P) will also be considered as missing and will be assumed to have 0 return. \
+4. Total return calculation: To calculate the total monthly return for each stock I will consider both returns (with dividends) and total delisting returns (with dividends). More specifically, if both the returns and delisting-returns are not missing then I will add both returns in the calculation to calculate the total return, if the returns are not missing and the delisting returns are missing I will only use the returns, and finally if the returns are missing and the delisting returns are not, I will only use the delisting returns. \
+5. Validation Checks: I have created a cross-reference table that contains all the available unique PERMNO with all the dates that will be used for the sample period (1927 - 2019). This reference table will be joined with the original CRSP Stock dataset to fill out any skipped months for each PERMNO. Hence, the resulting dataset will have a list of all the PERMNO and the dates available throughout the sample period. Any months that were skipped in the original dataset will have NAs as all the values in the resulting new dataset. Doing so will allow me to easily check for which stocks should be included at the formation period. \
+6. Stocks Formation: There are several conditions that must be satisfied in order for the stock to be included in the portfolio for that given month. First, the price of the stock at t-13 must not be missing. Second, the return at t-2 must also be available. These two conditions serve as a proxy that make sure the returns for months t-12 until t-2 are good. Furthermore, there has to be a minimum of 8 returns of non-missing data for the past t-12 to t-2 (1 month before the portfolio formation). Finally, the lagged market capitalization (ME at t-1) has to exist for each period, this ensures that I will be able to calculate the value-weighted return for each portfolio decile.
+All these 4 conditions have to be met for each PERMNO at each formation period to be included in that portfolio decile.
+7. Cumulative Returns: At each month, the log cumulative total returns for each PERMNO for the months t-12 to t-2 (1 month before the portfolio formation) will be calculated. Any missing returns (but satisfies criteria (6) above), will be considered that the return is 0 and the cumulative return for that PERMNO will still be calculated.
+8. Ranking Returns: At each month, the cumulative returns (calculated in (7)) for each PERMNO will be ranked accordingly. The resulting rank will be stored in the variable Ranking_Ret. Any stock that has the same cumulative returns for the given month will have the same rank and the treatment of this will be discussed below when I will split the stocks into 10 different deciles. \
+A sample output table is shown in the table below: \
+```{r}
+CRSP_Stocks_Momentum[c(1:5, (.N-5):.N),] %>% tbl_disp
+```
+
+
+```{r}
+###Q2
+
+PS3_Q2 <- function(CRSP_Momentum){
+  
+  df <- copy(CRSP_Momentum)
+  
+  #DM Decile
+  df[, DM_decile := cut(Ranking_Ret, breaks=quantile(Ranking_Ret, probs=c(0:10)/10,na.rm=TRUE), labels=F, right = F), by = .(Year,Month)]
+  df[is.na(DM_decile), DM_decile := as.integer(10)]
+  
+  #KRF Decile
+  pl <- copy(df[EXCHCD == 1])
+  pl[, KRF_decile := cut(Ranking_Ret, breaks=quantile(Ranking_Ret, probs=c(0:10)/10,na.rm=TRUE), labels=F, right = F), by = .(Year,Month)]
+  pl[is.na(KRF_decile), KRF_decile := as.integer(10)]
+  df  = merge(df, pl[, .(Year, Month, PERMNO, KRF_decile)], by = c("Year", "Month", "PERMNO"), all.x = T)
+  setorder(df, Year, Month, Ranking_Ret)
+  #carry forward
+  df[, KRF_decile := na.locf(KRF_decile, na.rm = F), by = .(Year,Month)]
+  df[is.na(KRF_decile),  KRF_decile := as.integer(1)]
+  
+  setorder(df, PERMNO, Year, Month)
+  df[, .(Year, Month, PERMNO, lag_Mkt_Cap, RET, DM_decile, KRF_decile)]  
+
+}
+
+CRSP_Stocks_Momentum_decile <- PS3_Q2(CRSP_Stocks_Momentum)
+
+```
+\newpage
+### Question 2.
+I will be calculating both the deciles as formed under Daniel-Moskowitz Momentum portfolios as well as the deciles formed under the Ken-French's momentum decile portfolios. The main difference of these two methods are the breakpoints used to split the firms into the different deciles at each month. Under the DM Momentum Portfolio decile, all stocks are used to determine the breakpoints (NYSE, ASE, NASDAQ). Whereas, under the KRF Momentum portfolio decile, only NYSE stocks are considered to determine the breakpoints. Hence, under the DM momentum decile, each decile has roughly the same number of firms, whereas under the KRF momentum decile, each decile has roughly the same number of NYSE firms. Furthermore, when creating portfolio deciles, I will create breakpoints according to the ranking return calculated from (1) and I will keep the right interval of the breakpoints open, meaning that firms located at exactly the boundary will be considered to be included in the next decile portfolio. When creating the KRF momentum decile, again, only the NYSE stocks are used to determine the breakpoints and the deciles from the KRF decile portfolio are carried forward to the other non-NYSE firms to determine the portfolio deciles. \
+```{r}
+CRSP_Stocks_Momentum_decile[c(1:5, (.N-5):.N),] %>% tbl_disp
+```
+
+
+
+```{r}
+### Q3
+
+#load fama french data
+ff = as.data.table(read.csv("F-F_Research_Data_Factors.CSV", stringsAsFactors = F, skip = 3, nrows = 1122))
+
+colnames(ff) <- c("date", "Market_minus_RF", "SMB","HML", "Rf")
+ff[, date := as.character(date)][, date := make_date(as.numeric(substring(date, 1,4)), as.numeric(substring(date, 5,6)), day = 1)]
+ff[, `:=`(Year = year(date),
+          Month = month(date))]
+ff[, `:=`(SMB = SMB/100,
+          HML = HML/100,
+          Rf = Rf/100,
+          Market_minus_RF = Market_minus_RF/100)]
+
+
+PS3_Q3 <- function(CRSP_df, FF){
+  
+  df <- copy(CRSP_Stocks_Momentum_decile)
+  
+  DM_dt <- df[, .(DM_Ret = weighted.mean(RET, lag_Mkt_Cap, na.rm = T)), by = .(Year, Month, DM_decile)]
+  KRF_dt <- df[, .(KRF_Ret = weighted.mean(RET, lag_Mkt_Cap, na.rm = T)), by = .(Year, Month, KRF_decile)]
+  
+  
+  res <- merge(DM_dt, KRF_dt, by.x = c("Year", "Month", "DM_decile"), by.y = c("Year", "Month", "KRF_decile"))
+  res <- merge(res, FF[,.(Year, Month, Rf)], by = c("Year", "Month"), all.x = T)
+  
+  res[, .(Year, Month, decile = DM_decile, DM_Ret, KRF_Ret, Rf)]
+}
+
+CRSP_Stocks_Momentum_returns <- PS3_Q3(CRSP_Stocks_Momentum_decile, ff)
+```
+
+\newpage
+### Question 3.
+The risk-free rate is the one month T-bill rate obtained from the Ken-French's data library. Both the monthly DM returns and KRF returns for each decile are constructed using value-weighted (VW) and the lagged market cap for each PERMNO is used to avoid a forward bias. The VW return for each decile for the DM and KRF returns are computed monthly. \
+Below is a sample table of the result: \
+```{r}
+CRSP_Stocks_Momentum_returns[c(1:5, (.N-5):.N),] %>% tbl_disp
+```
+
+
+```{r}
+###Q4
+PS3_Q4 <- function(CRSP_Ret){
+  
+  returns <- copy(CRSP_Ret)
+  
+  #change to excess returns
+  returns[ , `:=`(DM_Ret = DM_Ret - Rf,
+                  KRF_Ret = KRF_Ret - Rf)]
+  
+  wml <- returns[decile == 1,][returns[decile == 10,], on = c("Year", "Month")]
+  wml <- wml[, .(Year, Month, decile = 11, DM_Ret = i.DM_Ret - DM_Ret, KRF_Ret = i.KRF_Ret - KRF_Ret, Rf)]
+  
+  returns <- funion(returns, wml)
+  
+  returns <- returns[data.table::between(make_date(Year, Month, 1), "1927-01-01", "2013-03-31"), ]
+  
+  res <-returns[, .(DM_Excess_Ret = mean(DM_Ret) * 12,
+              DM_vol = sd(DM_Ret) * sqrt(12),
+              DM_skew = skewness(log(1+DM_Ret+Rf))), by = decile][, DM_SR := DM_Excess_Ret/DM_vol]
+  res <- t(res)
+  res <- res[c(2,3,5,4), ]
+  colnames(res) <- c(paste0("Decile ", 1:10), "WML")
+  rownames(res) <- c("Mean Excess Return", "Standard Deviation", "Sharpe Ratio", "Skewness(m)") 
+  return(res)
+}
+
+res_q4 <- PS3_Q4(CRSP_Stocks_Momentum_returns)
+
+```
+\newpage
+### Question 4.
+The table below shows the monthly momentum decile portfolio excess returns from January 1927 through March 2013. Each portfolio decile corresponds to that decile's biggest loser, i.e. decile 1 represents the 10% of stocks with the worst losses and decile 10 represents the 10% of stocks with the largest gains. The WML portfolio represents the long decile 1 and short decile 10 portfolio. The mean excess return, standard deviation and Sharpe Ratio (SR) calculated are annualized. The realized skewness shown in the table is the realized skewness of the monthly log returns and for the WML portfolio it is the realized skewness of $log(1+r_{WML}+r_f)$. \
+```{r}
+res_q4_dt <- as.data.table(res_q4, keep.rownames = T)
+res_q4_dt <- rbind(res_q4_dt[1:2, lapply(.SD, function(x) scales::percent(x, accuracy = 0.1)) , .SDcols = c(2:12)],
+      res_q4_dt[3:4, lapply(.SD, function(x) round(x, digits = 2)) , .SDcols = c(2:12)])
+res_q4_dt <- cbind("Return Statistic" = c("Mean Excess Return", "Standard Deviation", "Sharpe Ratio", "Skewness(m)") , res_q4_dt)
+res_q4_dt %>% tbl_disp(full_width = T, font_size = 8)
+
+```
+As seen from the table above, the table replicates the momentum decile portfolios of table 1 in Daniel and Moskowitz (2016) quite closely. The decile 1 portfolio's mean excess return is somewhat different with the replication showing a mean annualized excess return of -3.0% whereas table 1 shows a mean excess return of -2.5%. This could be caused by the treatment of the ranking of the firms on the boundary as discussed under (2). Furthermore, the monthly skewness for the decile 1, 4, 6, 7, 8, 9 are also quite different. This could also be caused by the different firms included in each decile portfolio due to the treatment of the ranking of the firms on the boundary, however, as it can later be seen in (5) the correlation returns for each decile portfolio is quite close to the actual DM momentum portfolio strategy. \
+
+
+```{r}
+##Q5
+DM_returns <- read.table("m_m_pt_tot.txt", header = F)
+colnames(DM_returns) <- c("date", "DM_Decile", "DM_Ret", "avg_me", "num_firm")
+
+DM_returns <- as.data.table(DM_returns)
+DM_returns[, date := as.Date(as.character(date), format = "%Y%m%d")]
+DM_returns[, `:=`(Year = year(date), Month = month(date))]
+
+
+KRF_returns <- read.csv("10_Portfolios_Prior_12_2.csv", skip = 10, nrows = 1119)
+KRF_returns <- as.data.table(KRF_returns)
+KRF_returns <- KRF_returns[, c(.("YearMon" = X), lapply(.SD, function(x) x/100)), .SDcols = -1]
+colnames(KRF_returns) <- c("YearMon", 1:10)
+
+KRF_returns[, `:=`(Year = as.numeric(substring(YearMon, 1, 4)), Month = as.numeric(substring(YearMon, 5, 6)))]
+KRF_returns <- melt(KRF_returns, id.vars = c("Year", "Month"), measure.vars = colnames(KRF_returns)[2:11], variable.name = "decile", value.name = "KRF_Ret")
+KRF_returns$decile <- as.numeric(KRF_returns$decile)
+
+
+PS3_Q5 <- function(CRSP_Ret, DM_Ret, KRF_Ret){
+  ret <- copy(CRSP_Stocks_Momentum_returns)
+  
+  ret <- ret[, .(Year, Month, decile, DM_Ret = DM_Ret - Rf, KRF_Ret = KRF_Ret - Rf)]
+  
+  create_wml <- function(df, ...){
+    wml_df <- df[decile == 1,][df[decile == 10,], on = c("Year", "Month")]
+    wml_df <- wml_df[, ...]
+    funion(df, wml_df)
+  }
+  
+  ret <- create_wml(ret, .(Year, Month, decile = 11, DM_Ret = i.DM_Ret - DM_Ret, KRF_Ret = i.KRF_Ret - KRF_Ret))
+  
+  DM_Ret <- create_wml(DM_Ret[, .(Year, Month, decile = DM_Decile, DM_Ret)], 
+                       .(Year, Month, decile = 11, DM_Ret = i.DM_Ret - DM_Ret))
+  
+  KRF_Ret <- create_wml(KRF_Ret[, .(Year, Month, decile = decile, KRF_Ret)], 
+                       .(Year, Month, decile = 11, KRF_Ret = i.KRF_Ret - KRF_Ret))
+  
+  cor_mat = matrix(0, ncol = 2, nrow = 11)
+  
+  #filter out dates
+  start_date = "1927-01-01"
+  end_date = "2016-12-31"
+  ret = ret[data.table::between(make_date(Year, Month, 1), start_date, end_date)]
+  KRF_Ret = KRF_Ret[data.table::between(make_date(Year, Month, 1), start_date, end_date)]
+  DM_Ret = DM_Ret[data.table::between(make_date(Year, Month, 1), start_date, end_date)]
+  
+  setorder(ret, decile, Year, Month)
+  setorder(KRF_Ret, decile, Year, Month)
+  setorder(DM_Ret, decile, Year, Month)
+  
+  for(i in 1:11){
+    cor_mat[i,1] = cor(ret[decile == i, DM_Ret], DM_Ret[decile == i, DM_Ret])
+    cor_mat[i,2] = cor(ret[decile == i, KRF_Ret], KRF_Ret[decile == i, KRF_Ret])
+  }
+  
+  
+ cor_mat = t(cor_mat)
+ rownames(cor_mat) <- c("DM Portfolio", "KRF Portfolio")
+ colnames(cor_mat) <- c(paste0("Decile ", 1:10), "WML")
+ return(cor_mat) 
+  
+}
+
+
+cor_q5 <- PS3_Q5(CRSP_Stocks_Momentum_returns, DM_returns, KRF_returns)
+```
+
+### Question 5.
+Once I have calculated the decile returns for each month for both the DM momentum decile portfolio and KRF momentum decile portfolio, I will now calculate the correlation of each decile's and each method's monthly returns. The actual DM momentum decile portfolio was taken from Daniel's website and the only data available is from January 1927 through December 2016. Hence, I will only calculate the correlation for that period. The actual KRF momentum decile portfolio was taken from Ken-French's data library and I will also use the sampe sample period (January 1927 through December 2016) to compare the correlation for the KRF momentum replication.
+```{r}
+cor_q5 %>% tbl_disp(full_width = T, font_size = 8)
+```
+As seen from the table above, the replicated decile returns for both the DM momentum portfolio and the KRF momentum portfolio closely follows the correponding actual momentum portfolios as seen from the correlations obtained by each decile returns for the considered sample period.
+
+
+### Question 6.
+The plot below shows the cumulative log returns for the winner portfolio (decile 10) and the loser portfolio (decile 1). It can be clearly seen that the cumulative returns from the decile 10 portfolio (winner portfolio) constantly keeps increasing.
+```{r}
+plot_df <- copy(CRSP_Stocks_Momentum_returns)
+
+plot_df[, date := make_date(Year, Month, 1)]
+setorder(plot_df, decile, date)
+plot_df[order(decile, date), cumret := log(cumprod(1 + DM_Ret)), by = .(decile)]
+
+
+ggplot()+
+  geom_line(aes(x = date, y = cumret, color = factor(decile) ), data = plot_df[decile %in% c(1,10)]) +
+  theme_bw() + ggtitle("Log Cumulative Return by Decile") + xlab("Date") + ylab("Log Cumulative Return") + 
+  scale_color_manual(name = "decile", values =c("black","blue"))
+```
+The plot suggests the momentum strategy formed using the WML portfolio long decile 10 and short decile 1 portfolio would still work in recent years.
+
+
+### Question 7.
+The main things to consider before implementing the strategy would first be the transactional costs associated with each decile portfolio. In recent years, the number of firms listed under NYSE, ASE and NASDAQ has been growing by quite a lot and a single decile portfolio might contain up to 300 firms. Hence, doing a long-short strategy on decile 10 and decile 1 respectively, can entail huge transaction costs as you might have to form a portfolio of up to 600 firms. Furthermore, the strategy is also rebalanced monthly which further increases the transaction costs of doing the trading strategy. Finally, Daniel and Moskowitz (2016) showed that the momentum crashes can easily be predicted by looking at ex ante volatility estimates, hence, by using a simple dynamically weighted of the momentum porfolio strategy, we can increase the sharpe ratio of the strategy significantly. Hence, both of these things need to be considered before actually implementing the strategy and if the strategy still generates positive returns after transactional costs then I would personally implement the strategy.
+
+
+
