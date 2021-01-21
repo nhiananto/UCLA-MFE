@@ -1,2 +1,2 @@
-# UCLA-MFE
- UCLA MFE Coursework
+# Quantitative Asset Management
+ The quantitative asset management course surveys a breadth of well-known asset management strategies. In particular, in this course, we have replicated Daniel and Moskowitz (2016) Momentum strategy, Kenneth R. French (KRF) momentum, Fama-French 3-factors (HML & SMB) portfolios, Frazzini and Pedersen (2010) Betting against Beta. Data are obtained from WRDS and is not included in the repository due to size constraints and limited access to the WRDS account.
